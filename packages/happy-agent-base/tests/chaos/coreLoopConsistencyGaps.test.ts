@@ -71,7 +71,7 @@ describe("core loop consistency gaps", () => {
             },
         });
 
-        await agent.send(ctx, user("switch models"), { await: true, model: "openai/gpt" });
+        await agent.send(ctx, user("switch models"), { model: "openai/gpt" });
         await agent.waitForIdle();
         if (escapedKV === undefined || escapedCtx === undefined) {
             throw new Error("The model-change hook did not receive KV.");
@@ -97,7 +97,7 @@ describe("core loop consistency gaps", () => {
             await originalWriteValue(writeCtx, key, value);
         };
 
-        const sending = agent.send(ctx, user("ordinary serialized write"), { await: true });
+        const sending = agent.send(ctx, user("ordinary serialized write"));
         await queueWriteStarted.promise;
         const escapedWrite = await outcomeOf(escapedKV.write(escapedCtx, "after-hook", "escaped"));
         const escapedValueLandedBeforeQueueLockReleased =
@@ -146,9 +146,7 @@ describe("core loop consistency gaps", () => {
             ) {
                 // Calling send during action A races an external writer against the action
                 // batch; the database transaction must still keep A and B contiguous.
-                externalSend = persistence.outsideTransaction(() =>
-                    agent.send(ctx, external, { await: true }),
-                );
+                externalSend = persistence.outsideTransaction(() => agent.send(ctx, external));
             }
         };
 
@@ -170,7 +168,7 @@ describe("core loop consistency gaps", () => {
             },
         });
 
-        await agent.send(ctx, user("begin"), { await: true });
+        await agent.send(ctx, user("begin"));
         await agent.waitForIdle();
         await externalSend;
         await agent.waitForIdle();
@@ -228,9 +226,9 @@ describe("core loop consistency gaps", () => {
             },
         });
 
-        await agent.send(ctx, user("first"), { await: true });
+        await agent.send(ctx, user("first"));
         await firstRunStarted.promise;
-        await agent.send(ctx, user("accepted while inference is active"), { await: true });
+        await agent.send(ctx, user("accepted while inference is active"));
         releaseFirstRun.resolve();
         await agent.waitForIdle();
         const requests = provider.sessions[0]?.requests.length;
@@ -259,7 +257,7 @@ describe("core loop consistency gaps", () => {
             provider: "scripted",
             persistence: new InMemoryPersistence(),
         });
-        await agent.send(ctx, user("create the session"), { await: true });
+        await agent.send(ctx, user("create the session"));
         await agent.waitForIdle();
 
         const session = provider.sessions[0];
@@ -325,7 +323,7 @@ describe("core loop consistency gaps", () => {
             },
         });
 
-        await agent.send(ctx, user("finish normally"), { await: true });
+        await agent.send(ctx, user("finish normally"));
         await agent.waitForIdle();
         await aborting;
         const terminalEvents = events.filter((event) => event.type === "done");

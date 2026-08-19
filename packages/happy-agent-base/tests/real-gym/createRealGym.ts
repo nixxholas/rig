@@ -118,7 +118,6 @@ export class RealGym {
             this.trace.agentId,
             { role: "user", content: [{ type: "text", text }] },
             {
-                await: true,
                 model: this.#model,
                 ...(this.#effort === undefined ? {} : { effort: this.#effort }),
             },

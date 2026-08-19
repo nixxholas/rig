@@ -78,7 +78,6 @@ export { knownModels, type Model } from "./models.js";
 // The run loop itself: its context carriers, key-value store, hook contracts, and persistence.
 export {
     AgentBase,
-    type AgentBaseAwaitOptions,
     type AgentBaseMessageOptions,
     type AgentBaseOptions,
     type AgentBaseQueueMode,

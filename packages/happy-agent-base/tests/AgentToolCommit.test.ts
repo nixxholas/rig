@@ -78,7 +78,7 @@ describe("transactional tool commits", () => {
             initialState: { tools: [tool] },
         });
 
-        await agent.send(ctx, user("run it"), { await: true });
+        await agent.send(ctx, user("run it"));
         await agent.waitForIdle();
 
         expect(received?.providerCallId).toBe(providerCallId);
@@ -133,7 +133,7 @@ describe("transactional tool commits", () => {
             initialState: { tools: [tool] },
         });
 
-        await agent.send(ctx, user("run it"), { await: true });
+        await agent.send(ctx, user("run it"));
         await agent.waitForIdle();
 
         expect(id).not.toBe("");
@@ -178,7 +178,7 @@ describe("transactional tool commits", () => {
             initialState: { tools: [tool] },
         });
 
-        await agent.send(ctx, user("run it"), { await: true });
+        await agent.send(ctx, user("run it"));
         await agent.waitForIdle();
 
         expect(firstFailure).toMatchObject({ message: "render failed" });
@@ -244,7 +244,7 @@ describe("transactional tool commits", () => {
             persistence,
             hooks,
         });
-        await first.send(ctx, user("begin"), { await: true });
+        await first.send(ctx, user("begin"));
         while (prefixes.length === 0) await Promise.resolve();
         await first.close();
 
@@ -300,7 +300,7 @@ describe("transactional tool commits", () => {
             initialState: { tools: [tool] },
         });
 
-        await agent.send(ctx, user("run it"), { await: true });
+        await agent.send(ctx, user("run it"));
         await committedResult;
         await agent.waitForIdle();
 
@@ -359,7 +359,7 @@ describe("transactional tool commits", () => {
             initialState: { tools: [tool] },
         });
 
-        await agent.send(ctx, user("run it"), { await: false });
+        await agent.send(ctx, user("run it"));
         await reachedPause;
 
         expect(persistence.values.has("transactional.marker")).toBe(false);
@@ -415,7 +415,7 @@ describe("transactional tool commits", () => {
             initialState: { tools: [tool] },
         });
 
-        await agent.send(ctx, user("run it"), { await: true });
+        await agent.send(ctx, user("run it"));
         await agent.waitForIdle();
 
         expect(persistence.values.has("transactional.rolled-back")).toBe(false);
@@ -473,7 +473,7 @@ describe("transactional tool commits", () => {
             initialState: { tools: [tool] },
         });
 
-        await agent.send(ctx, user("run it"), { await: true });
+        await agent.send(ctx, user("run it"));
         await agent.waitForIdle();
 
         expect(persistence.values.has("transactional.invalid")).toBe(false);
@@ -554,7 +554,7 @@ describe("transactional tool commits", () => {
                 initialState: { tools: [tool] },
             });
 
-            await agent.send(ctx, user("run it"), { await: true });
+            await agent.send(ctx, user("run it"));
             await agent.waitForIdle();
             const relevant = persistence.events.slice(persistence.events.indexOf("before"));
             await agent.close();
@@ -611,7 +611,7 @@ describe("transactional tool commits", () => {
                 initialState: { tools: [tool] },
             });
 
-            await agent.send(ctx, user("run it"), { await: false });
+            await agent.send(ctx, user("run it"));
             await committedResult;
             if (ending === "abort") {
                 await agent.abort(ctx);

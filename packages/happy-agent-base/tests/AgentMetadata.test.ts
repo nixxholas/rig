@@ -81,7 +81,6 @@ describe("message metadata and identity", () => {
         });
 
         const first = agent.send(ctx, user("only once"), {
-            await: true,
             id: MESSAGE_ID,
             metadata,
         });
@@ -99,7 +98,6 @@ describe("message metadata and identity", () => {
             persistence,
         });
         const retryAcceptance = await restarted.send(ctx, user("ignored retry"), {
-            await: true,
             id: MESSAGE_ID,
             metadata: { hideFromUser: false },
         });
@@ -185,11 +183,10 @@ describe("message metadata and identity", () => {
             },
         });
 
-        await expect(
-            agent.send(ctx, user("retry me"), { await: true, id: MESSAGE_ID }),
-        ).rejects.toThrow("pending write failed");
+        await expect(agent.send(ctx, user("retry me"), { id: MESSAGE_ID })).rejects.toThrow(
+            "pending write failed",
+        );
         const retry = await agent.send(ctx, user("retry me"), {
-            await: true,
             id: MESSAGE_ID,
         });
         await started;
@@ -228,7 +225,7 @@ describe("message metadata and identity", () => {
             },
         });
 
-        await agent.send(ctx, user("begin"), { await: true });
+        await agent.send(ctx, user("begin"));
         await agent.waitForIdle();
 
         expect(accepted.at(-1)).toEqual({
@@ -248,9 +245,9 @@ describe("message metadata and identity", () => {
             persistence: new InMemoryPersistence(),
         });
 
-        await expect(
-            agent.send(ctx, user("invalid"), { await: true, id: "not a cuid2" }),
-        ).rejects.toThrow("message ID must be a cuid2");
+        await expect(agent.send(ctx, user("invalid"), { id: "not a cuid2" })).rejects.toThrow(
+            "message ID must be a cuid2",
+        );
         await agent.close();
     });
 
@@ -277,7 +274,7 @@ describe("message metadata and identity", () => {
             },
         });
 
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await until(() => started);
         expect(deltaObserved).toBe(false);
         release();
@@ -443,10 +440,10 @@ describe("agent metadata, custom identity, and parentage", () => {
         supplied.title = "Mutated";
         supplied.owner.name = "Someone else";
 
-        await agent.send(ctx, user("first"), { await: true });
+        await agent.send(ctx, user("first"));
         await agent.waitForIdle();
         await agent.updateMetadata(ctx, { title: "Renamed", color: "blue" });
-        await agent.send(ctx, user("second"), { await: true });
+        await agent.send(ctx, user("second"));
         await agent.waitForIdle();
 
         const config = await system.config(ctx, ROOT_ID);
@@ -525,7 +522,6 @@ describe("agent metadata, custom identity, and parentage", () => {
             { id: ROOT_ID, parent: null },
         );
         await original.send(ctx, user("old conversation"), {
-            await: true,
             id: MESSAGE_ID,
         });
         await original.waitForIdle();
@@ -572,7 +568,7 @@ describe("agent metadata, custom identity, and parentage", () => {
             models: [],
         });
         const root = await system.create(ctx, {}, { id: ROOT_ID, parent: null });
-        await root.send(ctx, user("capture"), { await: true });
+        await root.send(ctx, user("capture"));
         await root.waitForIdle();
 
         expect(root.id).toBe(ROOT_ID);

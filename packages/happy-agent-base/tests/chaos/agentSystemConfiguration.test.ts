@@ -73,7 +73,7 @@ describe("agent system configuration", () => {
         const callerSettings = config.modules?.recorder;
         if (callerSettings !== undefined) callerSettings.label = "mutated by caller";
         const agent = await creation;
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await agent.waitForIdle();
         const durableConfig = await owner.config(ctx, agent.id);
         await agent.close();

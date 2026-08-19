@@ -395,7 +395,6 @@ describe.each(databaseBackends)("AgentStorage Drizzle persistence ($label)", ({ 
 
         const accepted = await rootCtx.inTx(async (txCtx) => {
             const result = await system.send(txCtx, agent.id, user("inside transaction"), {
-                await: true,
                 id: "h12345678901234567890123",
             });
             expect(
@@ -599,7 +598,7 @@ describe.each(databaseBackends)("AgentStorage Drizzle persistence ($label)", ({ 
 
         // The provisional object was never published and the rolled-back message is not durable.
         expect(provider.sessions).toEqual([]);
-        await system.send(ctx, created.id, user("after rollback"), { await: true });
+        await system.send(ctx, created.id, user("after rollback"));
         const agent = await system.resolve(ctx, created.id);
         await agent.waitForIdle();
         expect(provider.sessions[0]?.requests[0]?.context.messages).toEqual([
@@ -677,7 +676,7 @@ describe.each(databaseBackends)("AgentStorage Drizzle persistence ($label)", ({ 
             models: [],
         });
         const agent = await system.create(ctx, {});
-        await agent.send(ctx, user("already running"), { await: true });
+        await agent.send(ctx, user("already running"));
         await inInference;
 
         await withAgentDatabase(ctx, database).inTx(async (txCtx) => {
@@ -718,7 +717,6 @@ describe.each(databaseBackends)("AgentStorage Drizzle persistence ($label)", ({ 
             rootCtx.inTx(async (txCtx) => {
                 expect(
                     await agent.send(txCtx, user("rolled back"), {
-                        await: false,
                         id: messageId,
                     }),
                 ).toEqual({
@@ -736,7 +734,6 @@ describe.each(databaseBackends)("AgentStorage Drizzle persistence ($label)", ({ 
         expect(provider.sessions).toEqual([]);
         expect(
             await agent.send(ctx, user("retry after rollback"), {
-                await: false,
                 id: messageId,
             }),
         ).toEqual({
@@ -752,7 +749,120 @@ describe.each(databaseBackends)("AgentStorage Drizzle persistence ($label)", ({ 
         await close();
     });
 
-    it("rejects other live agent and system commands from an outer storage transaction", async () => {
+    it("finishes a live transactional delete before the identity can be recreated", async () => {
+        const { close, database } = await open();
+        const inferenceStarted = deferred<void>();
+        const releaseInference = deferred<void>();
+        const module: AgentModule = {
+            name: "block-inference",
+            beforeStart: () => ({
+                beforeInference: async () => {
+                    inferenceStarted.resolve();
+                    await releaseInference.promise;
+                },
+            }),
+        };
+        const storage = new AgentStorage({ acquireLock: lock(), database });
+        const system = await AgentSystemLocal.create(ctx, storage, {
+            modules: [module],
+            providers: providersOf(new ScriptedProvider([textTurn("done")])),
+            provider: "scripted",
+            models: [],
+        });
+        const agentId = "h12345678901234567890123";
+        const original = await system.create(
+            ctx,
+            { metadata: { title: "original" } },
+            { id: agentId },
+        );
+        await original.send(ctx, user("run"));
+        await inferenceStarted.promise;
+
+        await withAgentDatabase(ctx, database).inTx(async (txCtx) => {
+            await system.delete(txCtx, agentId);
+            await expect(system.resolve(txCtx, agentId)).rejects.toThrow("has not been created");
+            await expect(system.create(txCtx, {}, { id: agentId })).rejects.toThrow(
+                "cannot be recreated until its deleting transaction commits",
+            );
+        });
+
+        let recreated = false;
+        const creating = system
+            .create(ctx, { metadata: { title: "replacement" } }, { id: agentId })
+            .then((agent) => {
+                recreated = true;
+                return agent;
+            });
+        await Promise.resolve();
+        expect(recreated).toBe(false);
+        await withAgentDatabase(ctx, database).inTx(async (txCtx) => {
+            await expect(system.resolve(txCtx, agentId)).rejects.toThrow(
+                "still finishing deletion",
+            );
+            await expect(system.create(txCtx, {}, { id: agentId })).rejects.toThrow(
+                "still finishing deletion",
+            );
+        });
+        releaseInference.resolve();
+        const replacement = await creating;
+
+        expect(replacement).not.toBe(original);
+        expect(await system.resolve(ctx, agentId)).toBe(replacement);
+        expect(await system.config(ctx, agentId)).toEqual({
+            metadata: { title: "replacement" },
+            provenance: { createdAt: expect.any(Number) },
+        });
+        await expect(original.updateMetadata(ctx, { stale: true })).rejects.toThrow("closed");
+        await system.close(ctx);
+        await close();
+    });
+
+    it("drops transactional live commands when the outer transaction rolls back", async () => {
+        const { close, database } = await open();
+        const provider = new ScriptedProvider([]);
+        let metadataObserved = 0;
+        const module: AgentModule = {
+            name: "metadata-observer",
+            beforeStart: () => ({
+                metadataChanged: () => {
+                    metadataObserved += 1;
+                },
+            }),
+        };
+        const storage = new AgentStorage({ acquireLock: lock(), database });
+        const system = await AgentSystemLocal.create(ctx, storage, {
+            modules: [module],
+            providers: providersOf(provider),
+            provider: "scripted",
+            models: [],
+        });
+        const agent = await system.create(ctx, {});
+        const createdId = "h12345678901234567890123";
+
+        await expect(
+            withAgentDatabase(ctx, database).inTx(async (txCtx) => {
+                await system.create(txCtx, {}, { id: createdId });
+                await agent.updateMetadata(txCtx, { title: "rolled back" });
+                await agent.compact(txCtx);
+                await agent.abort(txCtx);
+                await system.delete(txCtx, agent.id);
+                await system.close(txCtx);
+                throw new Error("roll back live commands");
+            }),
+        ).rejects.toThrow("roll back live commands");
+
+        expect(await system.resolve(ctx, agent.id)).toBe(agent);
+        expect(await system.config(ctx, agent.id)).toEqual({
+            provenance: { createdAt: expect.any(Number) },
+        });
+        await expect(system.resolve(ctx, createdId)).rejects.toThrow("has not been created");
+        expect(metadataObserved).toBe(0);
+        expect(provider.sessions).toEqual([]);
+        await system.close(ctx);
+        await close();
+    });
+
+    it("allows every live agent and system command from an outer storage transaction", async () => {
         const { close, database } = await open();
         const storage = new AgentStorage({ acquireLock: lock(), database });
         const system = await AgentSystemLocal.create(ctx, storage, {
@@ -762,31 +872,28 @@ describe.each(databaseBackends)("AgentStorage Drizzle persistence ($label)", ({ 
         });
         const agent = await system.create(ctx, {});
         await agent.waitForIdle();
+        const createdId = "h12345678901234567890123";
 
         await withAgentDatabase(ctx, database).inTx(async (txCtx) => {
-            await expect(
-                system.create(txCtx, {}, { id: "h12345678901234567890123" }),
-            ).rejects.toThrow("outer storage transaction");
-            await expect(system.delete(txCtx, agent.id)).rejects.toThrow(
-                "outer storage transaction",
-            );
-            await expect(agent.updateMetadata(txCtx, { title: "not committed" })).rejects.toThrow(
-                "outer storage transaction",
-            );
-            await expect(agent.compact(txCtx)).rejects.toThrow("outer storage transaction");
-            await expect(agent.abort(txCtx)).rejects.toThrow("outer storage transaction");
-            await expect(system.resolve(txCtx, agent.id)).rejects.toThrow(
-                "outer storage transaction",
-            );
-            await expect(system.close(txCtx)).rejects.toThrow("outer storage transaction");
+            const created = await system.create(txCtx, {}, { id: createdId });
+            expect(await system.resolve(txCtx, createdId)).toBe(created);
+            await agent.updateMetadata(txCtx, { direct: true });
+            await system.updateMetadata(txCtx, agent.id, { title: "committed" });
+            await agent.compact(txCtx);
+            await agent.abort(txCtx);
+            await system.delete(txCtx, createdId);
         });
 
-        // Nothing the refused calls attempted was written, so the agent still holds exactly the
-        // configuration it was created with: where it came from, and nothing else.
         expect(await system.config(ctx, agent.id)).toEqual({
+            metadata: { direct: true, title: "committed" },
             provenance: { createdAt: expect.any(Number) },
         });
+        expect(await system.config(ctx, createdId)).toBeUndefined();
+        await withAgentDatabase(ctx, database).inTx(async (txCtx) => {
+            await system.close(txCtx);
+        });
         await system.close(ctx);
+        await expect(system.config(ctx, agent.id)).rejects.toThrow("closed");
         await close();
     });
 });

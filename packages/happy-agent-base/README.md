@@ -101,9 +101,9 @@ Messages receive a generated cuid2 identity, or accept one through `{ id }` for 
 delivery. A repeated ID is an ignored persistence conflict while its message remains in the
 durable conversation; deliberate conversation replacement releases identities for the records it
 removes. `send` and `steer` return the effective ID, delivery mode, and whether durable acceptance
-created the identity or found it already present. Inside an outer transaction, even an operation
-requested with `await: false` completes its durable queue write before returning, because work may
-not retain a transaction context after the transaction body ends. Optional immutable metadata
+created the identity or found it already present. Inside an outer transaction, delivery completes
+its durable queue write before returning because work may not retain a transaction context after
+the transaction body ends. Optional immutable metadata
 travels beside the provider message and reaches both message-accepted hooks; module-generated send
 and steer actions accept the same fields.
 

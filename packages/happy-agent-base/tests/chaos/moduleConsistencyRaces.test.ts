@@ -73,9 +73,9 @@ describe("module consistency races", () => {
         });
 
         try {
-            await agent.send(ctx, user("first"), { await: true });
+            await agent.send(ctx, user("first"));
             await agent.waitForIdle();
-            await agent.send(ctx, user("second"), { await: true });
+            await agent.send(ctx, user("second"));
             await agent.waitForIdle();
 
             expect(dottedModuleObserved).toBe("dotted module");
@@ -144,7 +144,7 @@ describe("module consistency races", () => {
         });
 
         try {
-            await agent.send(ctx, user("run both"), { await: true });
+            await agent.send(ctx, user("run both"));
             await agent.waitForIdle();
 
             expect.soft(dottedCallObserved).toBe("dotted call");

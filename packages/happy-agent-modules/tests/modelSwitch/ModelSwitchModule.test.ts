@@ -50,7 +50,7 @@ describe("ModelSwitchModule", () => {
             textTurn("hello"),
         ]);
 
-        await agent.send(ctx, user("hi"), { await: true, model: "openai/gpt-5.6-sol" });
+        await agent.send(ctx, user("hi"), { model: "openai/gpt-5.6-sol" });
         await agent.waitForIdle();
         await agent.close();
 
@@ -63,9 +63,9 @@ describe("ModelSwitchModule", () => {
             textTurn("still here"),
         ]);
 
-        await agent.send(ctx, user("hi"), { await: true, model: "openai/gpt-5.6-sol" });
+        await agent.send(ctx, user("hi"), { model: "openai/gpt-5.6-sol" });
         await agent.waitForIdle();
-        await agent.send(ctx, user("carry on"), { await: true, model: "anthropic/opus-5" });
+        await agent.send(ctx, user("carry on"), { model: "anthropic/opus-5" });
         await agent.waitForIdle();
         await agent.close();
 
@@ -81,9 +81,9 @@ describe("ModelSwitchModule", () => {
             textTurn("still here"),
         ]);
 
-        await agent.send(ctx, user("hi"), { await: true, model: "openai/gpt-5.6-sol" });
+        await agent.send(ctx, user("hi"), { model: "openai/gpt-5.6-sol" });
         await agent.waitForIdle();
-        await agent.send(ctx, user("carry on"), { await: true, model: "openai/gpt-5.4" });
+        await agent.send(ctx, user("carry on"), { model: "openai/gpt-5.4" });
         await agent.waitForIdle();
         await agent.close();
 

@@ -224,7 +224,7 @@ describe("PermissionsModule", () => {
             { reviewer, events },
         );
 
-        await agent.send(ctx, user("publish it"), { await: true });
+        await agent.send(ctx, user("publish it"));
         await agent.waitForIdle();
         await agent.close();
 
@@ -269,7 +269,7 @@ describe("PermissionsModule", () => {
             { reviewer, events },
         );
 
-        await agent.send(ctx, user("publish it"), { await: true });
+        await agent.send(ctx, user("publish it"));
         await agent.waitForIdle();
         await agent.close();
 
@@ -298,7 +298,7 @@ describe("PermissionsModule", () => {
             { reviewer, events },
         );
 
-        await agent.send(ctx, user("publish it"), { await: true });
+        await agent.send(ctx, user("publish it"));
         await agent.waitForIdle();
         await agent.close();
 
@@ -323,7 +323,7 @@ describe("PermissionsModule", () => {
             { reviewer },
         );
 
-        await agent.send(ctx, user("publish it"), { await: true });
+        await agent.send(ctx, user("publish it"));
         await agent.waitForIdle();
         await agent.close();
 
@@ -345,7 +345,7 @@ describe("PermissionsModule", () => {
             { events },
         );
 
-        await agent.send(ctx, user("publish it"), { await: true });
+        await agent.send(ctx, user("publish it"));
         await agent.waitForIdle();
         await agent.close();
 
@@ -370,7 +370,7 @@ describe("PermissionsModule", () => {
             { reviewer },
         );
 
-        await agent.send(ctx, user("run it"), { await: true });
+        await agent.send(ctx, user("run it"));
         await agent.waitForIdle();
         await agent.close();
 
@@ -394,7 +394,7 @@ describe("PermissionsModule", () => {
             { reviewer },
         );
 
-        await agent.send(ctx, user("run it"), { await: true });
+        await agent.send(ctx, user("run it"));
         await agent.waitForIdle();
         await agent.close();
 
@@ -416,7 +416,7 @@ describe("PermissionsModule", () => {
             { reviewer },
         );
 
-        await agent.send(ctx, user("inspect it"), { await: true });
+        await agent.send(ctx, user("inspect it"));
         await agent.waitForIdle();
         await agent.close();
 
@@ -451,7 +451,7 @@ describe("PermissionsModule", () => {
             { reviewer },
         );
 
-        await agent.send(ctx, user("publish it"), { await: true });
+        await agent.send(ctx, user("publish it"));
         await agent.waitForIdle();
         await agent.close();
 
@@ -473,7 +473,7 @@ describe("PermissionsModule", () => {
             ],
             { reviewer: unavailable },
         );
-        await unavailableRun.agent.send(ctx, user("publish it"), { await: true });
+        await unavailableRun.agent.send(ctx, user("publish it"));
         await unavailableRun.agent.waitForIdle();
         expect(toolResults(unavailableRun.provider).join("\n")).toContain(
             "Continue with work that does not need this permission",
@@ -499,7 +499,7 @@ describe("PermissionsModule", () => {
             { reviewer, events, permissionMode: "read_only" },
         );
 
-        await agent.send(ctx, user("go and look"), { await: true });
+        await agent.send(ctx, user("go and look"));
         await agent.waitForIdle();
         await agent.close();
 
@@ -521,7 +521,7 @@ describe("PermissionsModule", () => {
             { permissionMode: "workspace_write" },
         );
 
-        await agent.send(ctx, user("hello"), { await: true });
+        await agent.send(ctx, user("hello"));
         await agent.waitForIdle();
         await agent.close();
 
@@ -605,7 +605,7 @@ describe("PermissionsModule", () => {
         const agent = await system.create(ctx, {});
         agent.state.tools = [routineTool, escalatingTool, externalTool];
 
-        await agent.send(ctx, user("publish everything"), { await: true });
+        await agent.send(ctx, user("publish everything"));
         await agent.waitForIdle();
 
         expect(ran).toEqual([]);
@@ -675,7 +675,7 @@ describe("PermissionsModule", () => {
         );
 
         // The new mode is what the next tool call runs under.
-        await agent.send(ctx, user("have a look"), { await: true });
+        await agent.send(ctx, user("have a look"));
         await agent.waitForIdle();
         expect(ran).toEqual([{ tool: "look", mode: "read_only" }]);
         await system.close(ctx);
@@ -745,7 +745,7 @@ describe("PermissionsModule", () => {
             { reviewer, events },
         );
 
-        await agent.send(ctx, user("publish it"), { await: true });
+        await agent.send(ctx, user("publish it"));
         await agent.waitForIdle();
         await agent.close();
 
@@ -803,7 +803,7 @@ describe("PermissionsModule", () => {
             { reviewer, events },
         );
 
-        await agent.send(ctx, user("publish everything"), { await: true });
+        await agent.send(ctx, user("publish everything"));
         await agent.waitForIdle();
         await agent.close();
 
@@ -870,7 +870,7 @@ describe("PermissionsModule", () => {
         });
         const agent = await system.create(ctx, {});
         agent.state.tools = [routineTool, escalatingTool, externalTool];
-        await agent.send(ctx, user("publish everything"), { await: true });
+        await agent.send(ctx, user("publish everything"));
         await agent.waitForIdle();
         await system.close(ctx);
 
@@ -933,7 +933,6 @@ describe("PermissionsModule", () => {
         // The reviewer resolves its own model from the route the reviewed turn is running on, so
         // the turn names one, exactly as a turn on a real installation does.
         await agent.send(ctx, user("publish it"), {
-            await: true,
             provider: "scripted",
             model: "scripted/model",
             effort: "low",
@@ -983,7 +982,7 @@ describe("PermissionsModule", () => {
         });
         const throwingAgent = await throwingSystem.create(ctx, {});
         throwingAgent.state.tools = [routineTool, escalatingTool, externalTool];
-        await throwingAgent.send(ctx, user("publish it"), { await: true });
+        await throwingAgent.send(ctx, user("publish it"));
         await throwingAgent.waitForIdle();
         expect(toolResults(throwingProvider).join("\n")).toContain(
             "Automatic permission review refused",

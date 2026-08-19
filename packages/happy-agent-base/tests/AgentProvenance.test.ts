@@ -97,7 +97,7 @@ describe("agent provenance", () => {
         const system = await systemOf([spawner], [toolCallTurn("spawn"), textTurn("spawned one")]);
         const parent = await system.create(ctx, {});
 
-        await parent.send(ctx, user("spawn one"), { await: true });
+        await parent.send(ctx, user("spawn one"));
         await parent.waitForIdle();
 
         if (childId === undefined) throw new Error("The tool never created an agent.");

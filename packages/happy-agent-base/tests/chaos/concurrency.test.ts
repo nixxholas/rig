@@ -61,15 +61,15 @@ describe("durability under concurrent callers", () => {
             await pause(next);
             const message = user(text);
             if (index % 3 === 0) {
-                await agent.steer(ctx, message, { await: true });
+                await agent.steer(ctx, message);
             } else {
-                await agent.send(ctx, message, { await: true });
+                await agent.send(ctx, message);
             }
         });
         const disruptions = Array.from({ length: 3 }, () => async () => {
             await pause(next);
             if (next() < 0.5) {
-                await agent.abort(ctx, { await: true });
+                await agent.abort(ctx);
             } else {
                 agent.start();
             }

@@ -102,7 +102,7 @@ describe("consistency across destructive history boundaries", () => {
             },
         });
 
-        await agent.send(ctx, user("run both"), { await: true });
+        await agent.send(ctx, user("run both"));
         expect(await observedWithin(firstResultFailed.promise)).toBe(true);
         expect(await observedWithin(slowToolStarted.promise)).toBe(true);
         expect(await observedWithin(failureRecordPersisted.promise)).toBe(true);
@@ -152,7 +152,7 @@ describe("consistency across destructive history boundaries", () => {
             provider: "scripted",
             persistence: disk,
         });
-        await restarted.send(ctx, user("message after restart"), { await: true });
+        await restarted.send(ctx, user("message after restart"));
         await restarted.waitForIdle();
         const restartedContext = restartedProvider.sessions[0]?.requests[0]?.context.messages;
         await restarted.close();

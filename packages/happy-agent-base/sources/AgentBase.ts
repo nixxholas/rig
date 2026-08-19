@@ -27,6 +27,7 @@ import {
 
 import {
     agentDatabase,
+    agentId as agentIdOf,
     agentKV,
     agentStorageTransaction,
     withAgentContext,
@@ -141,29 +142,6 @@ export interface AgentBaseMessageOptions {
      */
     readonly permissionMode?: AgentPermissionMode;
 }
-/**
- * Whether an operation resolves once the agent has taken the request on, or once the agent has
- * carried it out. Every operation that asks something of an agent accepts this, and every one of
- * most of them default to the first: asking is the operation, and waiting is opt-in. Message
- * acceptance defaults to the durable result except inside the target's own loop, where waiting
- * would deadlock.
- *
- * The reason is re-entrancy. An agent does its work in one run loop, and while a hook or a tool
- * runs, that loop is waiting for it — so code in that position that waits for its own agent waits
- * for itself. Rather than offer some operations in a waiting form and others not, every operation
- * returns as soon as the request is registered, and `await: true` asks for the rest. That flag is
- * refused, loudly, when the caller's context says it is running inside the loop of the very agent
- * it is asking, which is the only case where the wait could never end.
- */
-export interface AgentBaseAwaitOptions {
-    /**
-     * Wait for the operation to finish rather than for it to be accepted. Message delivery uses
-     * this to request the durable created/existing result. Refused from inside the agent's own
-     * run loop.
-     */
-    readonly await?: boolean;
-}
-
 /** A durably queued message together with the settings it carries. */
 interface QueueEntry {
     /** The store key the message was written under and removed through when consumed. */
@@ -282,9 +260,8 @@ export interface AgentBaseOptions {
  * A message is accepted exactly once, or not at all. Its durable write and the writes of every
  * other message in the same batch commit in one transaction under one hold of the lock. So:
  *
- * - `steer` and `send` with `await: true` resolve only once the message is durable; a failed
- *   write keeps it out of the conversation entirely. Without the flag they return early, but the
- *   acceptance is the same one, and a close still waits for it.
+ * - `steer` and `send` resolve once the message is durable, except inside the target's own loop
+ *   where waiting would deadlock. A failed write keeps it out of the conversation entirely.
  * - Messages a hook returns from one decision are accepted as one batch. A caller arriving while
  *   that batch is being written lands after all of it, never between two halves of one thought.
  * - Queue keys order by what the store already holds, including when the clock moves backwards.
@@ -374,8 +351,6 @@ export interface AgentBaseOptions {
  *   its own outcome adds nothing, since that response is over.
  *
  * `abort` signals and returns, because the cancellation is complete once it is signalled.
- * `abort(ctx, { await: true })` additionally waits for the loop to stop, which is what an owner
- * outside the agent usually wants and what code inside it must not ask for — see below.
  *
  * ## Close
  *
@@ -392,19 +367,11 @@ export interface AgentBaseOptions {
  * ## Re-entrancy
  *
  * A hook or a tool runs while the loop is waiting for it, so anything it asks of its own agent
- * that only the loop can deliver would wait for itself. Rather than leave that to be remembered
- * per operation, asking and waiting are separated everywhere:
+ * that only the loop can deliver would wait for itself. Loop operations therefore have one safe
+ * behavior from every caller:
  *
- * - `steer`, `send`, `abort` and `compact` are safe from anywhere in their asking form, which is
- *   the default. Each registers what it registers and returns; the loop acts on it afterwards.
- * - `await: true` asks for the part only the loop can give. Contexts handed to hooks and tools
- *   record which agents' loops the execution is inside, so the flag is refused with an error that
- *   names the problem instead of hanging. The check is per agent: work inside one agent's loop
- *   may still wait on another's, which is what makes a subagent's report to its parent safe.
- * - The refusal is uniform even where a particular wait would have happened to work. A tool that
- *   waits for its own abort, for instance, does unwind — the batch races each execution against
- *   cancellation — but that is a property of tool batches rather than of abort, and a rule that
- *   holds only in one position is worse than no rule.
+ * - `steer` and `send` wait for durable acceptance except when aimed at the caller's own loop.
+ * - `abort` and `compact` register their request and return; the loop acts afterwards.
  * - A hook that wants a compaction has a better option than requesting one: the
  *   `{ type: "compact" }` action it returns lands exactly where the loop can act on it, in order
  *   with the rest of that decision.
@@ -1006,7 +973,7 @@ export class AgentBase {
     async steer(
         ctx: Context,
         message: AgentQueuedMessage,
-        options?: AgentBaseMessageOptions & AgentBaseAwaitOptions,
+        options?: AgentBaseMessageOptions,
     ): Promise<AgentMessageAcceptance> {
         return await this.#offer(ctx, "steering", message, options);
     }
@@ -1021,7 +988,7 @@ export class AgentBase {
     async send(
         ctx: Context,
         message: AgentQueuedMessage,
-        options?: AgentBaseMessageOptions & AgentBaseAwaitOptions,
+        options?: AgentBaseMessageOptions,
     ): Promise<AgentMessageAcceptance> {
         return await this.#offer(ctx, "send", message, options);
     }
@@ -1031,7 +998,6 @@ export class AgentBase {
      * transactional hook writes commit together; observing hooks run only after that commit.
      */
     async updateMetadata(ctx: Context, update: AgentMetadata): Promise<void> {
-        this.#assertOutsideStorageTransaction(ctx, "metadata update");
         const ownedUpdate = ownAgentMetadata(update);
         if (ownedUpdate === undefined) throw new Error("The agent metadata is not valid.");
         if (this.#closed) throw new Error("The agent has been closed.");
@@ -1077,11 +1043,23 @@ export class AgentBase {
                 });
             });
         });
-        await this.#invokeHookOn(
-            this.#hookContext(withAgentConfig(ctx, next)),
-            this.#hooks.metadataChanged,
-            change,
-        );
+        if (agentStorageTransaction(ctx) === undefined) {
+            await this.#invokeHookOn(
+                this.#hookContext(withAgentConfig(ctx, next)),
+                this.#hooks.metadataChanged,
+                change,
+            );
+        } else {
+            afterCommit(ctx, () => {
+                outsideAgentDatabaseOperation(() => {
+                    void this.#invokeHookOn(
+                        this.#hookContext(withAgentConfig(this.#ctx, next)),
+                        this.#hooks.metadataChanged,
+                        change,
+                    );
+                });
+            });
+        }
     }
 
     /**
@@ -1093,30 +1071,18 @@ export class AgentBase {
         ctx: Context,
         kind: QueueRequest["kind"],
         message: AgentQueuedMessage,
-        options: (AgentBaseMessageOptions & AgentBaseAwaitOptions) | undefined,
+        options: AgentBaseMessageOptions | undefined,
     ): Promise<AgentMessageAcceptance> {
         const outerTransaction = agentStorageTransaction(ctx);
         if (outerTransaction?.lifetime.aborted === true) {
             throw new Error("The agent storage transaction carried by this context has ended.");
         }
-        const {
-            await: requestedWait,
-            id = createId(),
-            metadata: suppliedMetadata,
-            ...settings
-        } = options ?? {};
+        const { id = createId(), metadata: suppliedMetadata, ...settings } = options ?? {};
         if (!Value.Check(cuid2Schema, id)) {
             throw new Error("The message ID must be a cuid2 identity.");
         }
-        const wait = requestedWait ?? !insideTurn.get(ctx).includes(this.id);
+        const wait = agentIdOf(ctx) !== this.id && !insideTurn.get(ctx).includes(this.id);
         const metadata = ownAgentMessageMetadata(suppliedMetadata);
-        // Refusing the flag rather than the operation: a closed agent and a re-entrant wait are
-        // both caller mistakes, and both are reported before any work is started.
-        this.#assertCanWait(
-            ctx,
-            wait,
-            kind === "steering" ? "a steered message" : "a sent message",
-        );
         if (this.#closed) throw new Error("The agent has been closed.");
         const knownInProcess = this.#offeredMessageIds.has(id);
         if (outerTransaction === undefined) {
@@ -1164,20 +1130,6 @@ export class AgentBase {
     }
 
     /**
-     * Refuse a wait that could never end. A hook or a tool runs while its agent's loop waits for
-     * it, so waiting for that same agent to finish anything is waiting for oneself; the request
-     * itself is always allowed, and asking for another agent is unaffected.
-     */
-    #assertCanWait(ctx: Context, wait: boolean, operation: string): void {
-        if (!wait) return;
-        if (!insideTurn.get(ctx).includes(this.id)) return;
-        throw new Error(
-            `Waiting for ${operation} from inside the agent's own run loop would wait for a ` +
-                "turn that cannot finish. Drop `await: true` to ask for it and return.",
-        );
-    }
-
-    /**
      * Whether the current execution is running inside this agent's own run loop, judged by the
      * scope the loop marks itself with. This is what an operation carrying no context has to go
      * on. Anything that takes a context asks the context instead: it names the caller, where
@@ -1186,15 +1138,6 @@ export class AgentBase {
      */
     #insideOwnLoop(): boolean {
         return insideLoops.getStore()?.includes(this.id) === true;
-    }
-
-    /** Live agent commands cannot be staged or undone by an enclosing database transaction. */
-    #assertOutsideStorageTransaction(ctx: Context, operation: string): void {
-        if (agentStorageTransaction(ctx) !== undefined) {
-            throw new Error(
-                `Agent ${operation} cannot run from inside an outer storage transaction.`,
-            );
-        }
     }
 
     /** Run one persistence step; its database statements and transactions own consistency. */
@@ -1483,33 +1426,21 @@ export class AgentBase {
      * away when idle — and replaces the compacted history with the provider's replacement context
      * while keeping every message that joined the history after the snapshot.
      *
-     * Returns once the compaction has been asked for; with `await: true` it returns once the
-     * compaction has run, rejecting when the provider reports failure or when nothing will carry
-     * it out. Callers that wait while a compaction is pending or running all wait for that same
-     * compaction rather than queueing another.
+     * Returns once the compaction has been asked for. Concurrent requests share one compaction.
      */
-    async compact(ctx: Context, options?: AgentBaseAwaitOptions): Promise<void> {
-        this.#assertOutsideStorageTransaction(ctx, "compaction");
-        const wait = options?.await ?? false;
-        this.#assertCanWait(ctx, wait, "a compaction");
+    async compact(ctx: Context): Promise<void> {
         if (this.#closed) throw new Error("The agent has been closed.");
-        // A compaction runs between turns, so waiting for one waits for the target's current
-        // turn to end. That is safe from an ordinary caller, and safe from another agent going
-        // about its own business. It is not safe from inside a turn while the target is running
-        // a tool: that tool may be waiting for this caller's agent, and neither side can see the
-        // other half of the cycle. Such a request is refused outright rather than left standing,
-        // because the caller asked to be told when the conversation had been replaced — and a
-        // replacement carried out later, once nobody is waiting for it, is a different thing
-        // from what was asked for. Ask again from a caller that can wait, or without the wait.
-        if (wait && this.#toolsRunning > 0 && insideTurn.get(ctx).length > 0) {
-            throw new Error(
-                `Agent ${JSON.stringify(this.id)} is running a tool, so a compaction cannot be ` +
-                    "waited for from inside another agent's turn: the two could be waiting for " +
-                    "each other. Ask for it without `await: true`, or from outside a turn.",
-            );
+        if (agentStorageTransaction(ctx) !== undefined) {
+            afterCommit(ctx, () => {
+                outsideAgentDatabaseOperation(() => {
+                    void this.compact(this.#ctx).catch((error: unknown) => {
+                        this.#ctx.log.warn("The committed agent compaction failed.", error);
+                    });
+                });
+            });
+            return;
         }
         const compaction = this.#ensureCompaction();
-        if (wait) return compaction;
         compaction.catch(() => undefined);
     }
 
@@ -1617,26 +1548,25 @@ export class AgentBase {
      * and send queues stay durable and join the next requested turn. A no-op when the agent is
      * idle.
      *
-     * Returns once the cancellation has been signalled, which is the point from which nothing
-     * more of that turn happens; with `await: true` it returns once the loop has actually
-     * unwound. The cancellation is identical either way — waiting only buys the answer about
-     * when it finished.
+     * Returns once the cancellation has been signalled.
      */
-    async abort(ctx: Context, options?: AgentBaseAwaitOptions): Promise<void> {
-        this.#assertOutsideStorageTransaction(ctx, "abort");
-        const wait = options?.await ?? false;
-        this.#assertCanWait(ctx, wait, "an abort");
+    async abort(ctx: Context): Promise<void> {
+        if (agentStorageTransaction(ctx) !== undefined) {
+            afterCommit(ctx, () => {
+                outsideAgentDatabaseOperation(() => {
+                    void this.abort(this.#ctx).catch((error: unknown) => {
+                        this.#ctx.log.warn("The committed agent abort failed.", error);
+                    });
+                });
+            });
+            return;
+        }
         const run = this.#signalAbort();
         if (run === undefined) return;
         // Dropping the turn request drops the only thing that would have carried out a
         // compaction asked for during it, so its callers are told rather than left waiting for
         // a turn that will never come. That happens once the loop has stopped, whether or not
         // anyone here is waiting to see it.
-        if (wait) {
-            await run;
-            this.#settlePendingCompaction("The compaction was cancelled by an abort.");
-            return;
-        }
         void run
             .catch(() => undefined)
             .then(() => {

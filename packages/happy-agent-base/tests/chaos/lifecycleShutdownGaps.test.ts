@@ -103,9 +103,9 @@ describe("abort and shutdown lifecycle gaps", () => {
             },
         });
 
-        await agent.send(ctx, user("cancel during startup"), { await: true });
+        await agent.send(ctx, user("cancel during startup"));
         await hookStarted.promise;
-        const aborting = agent.abort(ctx, { await: true });
+        const aborting = agent.abort(ctx);
         releaseHook.resolve();
         await aborting;
         await agent.waitForIdle();
@@ -141,9 +141,9 @@ describe("abort and shutdown lifecycle gaps", () => {
             },
         });
 
-        await agent.send(ctx, user("first request"), { await: true });
+        await agent.send(ctx, user("first request"));
         await hookStarted.promise;
-        const aborting = agent.abort(ctx, { await: true });
+        const aborting = agent.abort(ctx);
         releaseHook.resolve();
         await aborting;
         await agent.waitForIdle();
@@ -209,7 +209,7 @@ describe("abort and shutdown lifecycle gaps", () => {
             persistence,
         });
         let compactionSettled = false;
-        const compacting = agent.compact(ctx, { await: true }).then(
+        const compacting = agent.compact(ctx).then(
             () => {
                 compactionSettled = true;
             },
@@ -219,7 +219,7 @@ describe("abort and shutdown lifecycle gaps", () => {
         );
         await compactionStarted.promise;
 
-        const aborting = agent.abort(ctx, { await: true });
+        const aborting = agent.abort(ctx);
         const abortSettledBeforeRelease = await settlesWhileBlocked(aborting);
         const compactionSettledBeforeRelease = compactionSettled;
         const signalAbortedBeforeRelease = compactionSignal?.aborted === true;
@@ -281,7 +281,7 @@ describe("abort and shutdown lifecycle gaps", () => {
             provider: "scripted",
             persistence: new InMemoryPersistence(),
         });
-        await agent.send(ctx, user("open a stream"), { await: true });
+        await agent.send(ctx, user("open a stream"));
         await Promise.all([runStarted.promise, cleanupStarted.promise]);
 
         const closing = agent.close();
@@ -342,11 +342,11 @@ describe("abort and shutdown lifecycle gaps", () => {
             persistence: new InMemoryPersistence(),
             initialState: { instructions: "first configuration" },
         });
-        await agent.send(ctx, user("first request"), { await: true });
+        await agent.send(ctx, user("first request"));
         await Promise.all([firstRunStarted.promise, cleanupStarted.promise]);
 
         agent.state.instructions = "second configuration";
-        await agent.send(ctx, user("force session recreation"), { await: true });
+        await agent.send(ctx, user("force session recreation"));
         const destroyStartedBeforeCleanupRelease = await settlesWhileBlocked(
             firstDestroyStarted.promise,
         );
@@ -416,11 +416,10 @@ describe("abort and shutdown lifecycle gaps", () => {
                 },
             },
         });
-        await agent.send(ctx, user("first request"), { await: true });
+        await agent.send(ctx, user("first request"));
         await Promise.all([firstRunStarted.promise, cleanupStarted.promise]);
 
         await agent.send(ctx, user("switch models"), {
-            await: true,
             model: "anthropic/claude-b",
         });
         await switchObserved.promise;
@@ -504,14 +503,14 @@ describe("abort and shutdown lifecycle gaps", () => {
             provider: "scripted",
             persistence,
         });
-        await agent.send(ctx, user("first request"), { await: true });
+        await agent.send(ctx, user("first request"));
         await firstRunStarted.promise;
-        await agent.abort(ctx, { await: true });
+        await agent.abort(ctx);
         await cleanupStarted.promise;
 
-        await agent.send(ctx, user("second request"), { await: true });
+        await agent.send(ctx, user("second request"));
         await secondMessageConsumed.promise;
-        const secondAbort = agent.abort(ctx, { await: true });
+        const secondAbort = agent.abort(ctx);
         const secondAbortSettledBeforeCleanupRelease = await settlesWhileBlocked(secondAbort);
 
         releaseCleanup.resolve();
@@ -546,7 +545,7 @@ describe("abort and shutdown lifecycle gaps", () => {
             provider: "scripted",
             persistence,
         });
-        const sending = agent.send(ctx, user("already admitted"), { await: true });
+        const sending = agent.send(ctx, user("already admitted"));
         await writeStarted.promise;
         const idle = agent.waitForIdle();
         const idleSettledBeforeWriteRelease = await settlesWhileBlocked(idle);
@@ -594,7 +593,7 @@ describe("abort and shutdown lifecycle gaps", () => {
             },
         });
 
-        await agent.send(ctx, user("switch models"), { await: true, model: "openai/gpt" });
+        await agent.send(ctx, user("switch models"), { model: "openai/gpt" });
         await agent.waitForIdle();
         const escapedValue = persistence.values.get("kv.model-change-kv-rollback.selected-model");
         await agent.close();

@@ -7,7 +7,7 @@ import type { AgentMetadata } from "./AgentMetadata.js";
 import type { AgentMessageAcceptance } from "./AgentMessageAcceptance.js";
 import type { AgentModel } from "./AgentModel.js";
 import type { AgentQueuedMessage } from "./AgentQueuedMessage.js";
-import { acceptanceIsWaitable, AgentRef } from "./AgentRef.js";
+import { AgentRef } from "./AgentRef.js";
 import type { AgentCreateOptions, AgentSystem } from "./AgentSystem.js";
 
 /**
@@ -18,8 +18,8 @@ import type { AgentCreateOptions, AgentSystem } from "./AgentSystem.js";
  * What is missing is missing on purpose. `delete` closes an agent and `start` resumes whole
  * agents; both are the owning caller's business, and both would wait for a loop that may be
  * waiting for the very code asking. Agents come back as `AgentRef` for the same reason — handing
- * out the real `Agent` would hand back `close` and `waitForIdle` along with the `await: true`
- * that waits for a compaction or an unwound turn.
+ * out the real `Agent` would hand back `close` and `waitForIdle`, both of which wait for the
+ * whole agent.
  *
  * A message is the one thing a caller here may be told about, because accepting one is a durable
  * queue write rather than a turn: `steer` and `send` resolve once the message is safely part of
@@ -105,10 +105,7 @@ export class AgentSystemRef<Database extends AgentDatabase = AgentDatabase> {
         options?: AgentBaseMessageOptions,
     ): Promise<AgentMessageAcceptance> {
         this.#assertNotLifecycleTarget(agentId);
-        return await this.#system.steer(ctx, agentId, message, {
-            ...options,
-            await: acceptanceIsWaitable(ctx, agentId),
-        });
+        return await this.#system.steer(ctx, agentId, message, options);
     }
 
     /**
@@ -123,10 +120,7 @@ export class AgentSystemRef<Database extends AgentDatabase = AgentDatabase> {
         options?: AgentBaseMessageOptions,
     ): Promise<AgentMessageAcceptance> {
         this.#assertNotLifecycleTarget(agentId);
-        return await this.#system.send(ctx, agentId, message, {
-            ...options,
-            await: acceptanceIsWaitable(ctx, agentId),
-        });
+        return await this.#system.send(ctx, agentId, message, options);
     }
 
     /** Ask an agent to compact, and resolve once it has been asked. */

@@ -396,7 +396,7 @@ describe("AgentSystemLocal", () => {
         expect(firstAgent).toBe(secondAgent);
         expect(stores).toBe(1);
 
-        await firstAgent.send(ctx, user("go"), { await: true });
+        await firstAgent.send(ctx, user("go"));
         await firstAgent.waitForIdle();
 
         // Both modules were told the same agent, in the order the collection was given them.
@@ -469,10 +469,10 @@ describe("AgentSystemLocal", () => {
         );
 
         const created = await agentSystem.create(ctx, {});
-        await agentSystem.send(ctx, created.id, user("send"), { await: true });
+        await agentSystem.send(ctx, created.id, user("send"));
         const agent = await agentSystem.resolve(ctx, created.id);
         await agent.waitForIdle();
-        await agentSystem.steer(ctx, created.id, user("steer"), { await: true });
+        await agentSystem.steer(ctx, created.id, user("steer"));
         await agent.waitForIdle();
 
         const session = provider.sessions[0];
@@ -492,7 +492,8 @@ describe("AgentSystemLocal", () => {
             },
             context: { instructions: "", messages: [] },
         });
-        await agentSystem.compact(ctx, created.id, { await: true });
+        await agentSystem.compact(ctx, created.id);
+        await agent.waitForIdle();
         expect(session?.compactions).toHaveLength(1);
 
         await agentSystem.abort(ctx, created.id);
@@ -545,7 +546,7 @@ describe("AgentSystemLocal queue modes", () => {
         );
         try {
             const agent = await system.create(ctx, {});
-            await agent.send(ctx, user("go"), { await: true });
+            await agent.send(ctx, user("go"));
             await agent.waitForIdle();
 
             const requests = provider.sessions[0]?.requests ?? [];
@@ -624,7 +625,7 @@ describe("AgentSystemLocal configuration", () => {
         );
 
         const agent = await agentSystem.create(ctx, config);
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await agent.waitForIdle();
         // The collection states where the agent came from, so what a module sees is what was
         // passed plus that. Nothing created this one, so it is recorded as having no creator.
@@ -643,7 +644,7 @@ describe("AgentSystemLocal configuration", () => {
             new ScriptedProvider([textTurn("third")]),
         );
         const resolved = await restarted.resolve(ctx, agent.id);
-        await resolved.send(ctx, user("again"), { await: true });
+        await resolved.send(ctx, user("again"));
         await resolved.waitForIdle();
         expect(seen).toEqual([created, created]);
         await resolved.close();
@@ -725,9 +726,9 @@ describe("AgentSystemLocal shared modules", () => {
         expect(first.module("shared-recorder")).toBe(second.module("shared-recorder"));
 
         // That instance serves both agents, and its instructions open every prompt.
-        await first.send(ctx, user("first"), { await: true });
+        await first.send(ctx, user("first"));
         await first.waitForIdle();
-        await second.send(ctx, user("second"), { await: true });
+        await second.send(ctx, user("second"));
         await second.waitForIdle();
         expect(SharedRecorder.instances[0]?.served).toEqual([first.id, second.id]);
         expect(provider.sessions.map((session) => session.options.instructions)).toEqual([
@@ -768,10 +769,10 @@ describe("AgentSystemLocal shared modules", () => {
         const agentSystem = await collectionOf(provider, [postbox]);
 
         const first = await agentSystem.create(ctx, {});
-        await first.send(ctx, user("first"), { await: true });
+        await first.send(ctx, user("first"));
         await first.waitForIdle();
         const second = await agentSystem.create(ctx, {});
-        await second.send(ctx, user("second"), { await: true });
+        await second.send(ctx, user("second"));
         await second.waitForIdle();
 
         // The second agent reads what the first left in the shared store, and nothing in its own.
@@ -813,7 +814,7 @@ describe("AgentSystemLocal shared modules", () => {
         );
 
         const agent = await agentSystem.create(ctx, {});
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await agent.waitForIdle();
 
         expect(seen).toBeInstanceOf(AgentSystemRef);

@@ -54,7 +54,7 @@ describe("durable pending state", () => {
         });
 
         expect(agent.active).toBe(false);
-        await agent.send(ctx, user("question"), { await: true });
+        await agent.send(ctx, user("question"));
         await agent.waitForIdle();
 
         // While the model was being asked, the store said so; once the run ended, the record is
@@ -84,7 +84,7 @@ describe("durable pending state", () => {
             },
         });
 
-        await agent.send(ctx, user("question"), { await: true });
+        await agent.send(ctx, user("question"));
         await inferenceStarted.promise;
         const activeWhileWorking = agent.active;
         releaseInference.resolve();
@@ -115,7 +115,7 @@ describe("durable pending state", () => {
             },
         });
 
-        await abandoned.send(ctx, user("question"), { await: true });
+        await abandoned.send(ctx, user("question"));
         await inferenceStarted.promise;
 
         // A process that dies here writes nothing further. What it already committed is the
@@ -178,7 +178,7 @@ describe("durable pending state", () => {
             },
         });
 
-        await agent.send(ctx, user("question"), { await: true });
+        await agent.send(ctx, user("question"));
         await agent.waitForIdle();
 
         expect(persistence.values.get("conclusion")).toEqual({ owedAtWriteTime: undefined });
@@ -202,7 +202,7 @@ describe("durable pending state", () => {
             },
         });
 
-        await agent.send(ctx, user("question"), { await: true });
+        await agent.send(ctx, user("question"));
         await agent.waitForIdle();
 
         // A conclusion that failed to be written must not be reported as one that was, so the

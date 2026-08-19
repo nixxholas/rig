@@ -168,7 +168,7 @@ describe("self-reentrant tool calls", () => {
             initialState: { tools: [tool] },
         });
 
-        await agent.send(ctx, user("start"), { await: true });
+        await agent.send(ctx, user("start"));
         await agent.waitForIdle();
         const requests = provider.sessions[0]?.requests ?? [];
         await agent.close();
@@ -203,7 +203,7 @@ describe("self-reentrant tool calls", () => {
             initialState: { tools: [tool] },
         });
 
-        await agent.send(ctx, user("start"), { await: true });
+        await agent.send(ctx, user("start"));
         await agent.waitForIdle();
         const requests = provider.sessions[0]?.requests ?? [];
         await agent.close();
@@ -234,7 +234,7 @@ describe("self-reentrant tool calls", () => {
             initialState: { tools: [tool] },
         });
 
-        await agent.send(ctx, user("start"), { await: true });
+        await agent.send(ctx, user("start"));
         await sending;
         await agent.waitForIdle();
         const requests = provider.sessions[0]?.requests ?? [];
@@ -245,13 +245,13 @@ describe("self-reentrant tool calls", () => {
         expect(toolResults(persistence)).toHaveLength(1);
     });
 
-    it("rejects an awaited self-compaction promptly without poisoning a later compaction", async () => {
+    it("requests self-compaction promptly without poisoning a later compaction", async () => {
         const persistence = new InMemoryPersistence();
         const provider = new ScriptedProvider([toolCallTurn(), textTurn("after tool")]);
         let agent!: AgentBase;
         let insideResult!: Observed;
         const tool = selfTool(async (callCtx) => {
-            insideResult = await observeWithin(agent.compact(callCtx, { await: true }));
+            insideResult = await observeWithin(agent.compact(callCtx));
         });
         agent = await AgentBase.create(ctx, {
             id: "await-self-compaction",
@@ -261,19 +261,18 @@ describe("self-reentrant tool calls", () => {
             initialState: { tools: [tool] },
         });
 
-        await agent.send(ctx, user("start"), { await: true });
+        await agent.send(ctx, user("start"));
         await agent.waitForIdle();
         const session = provider.sessions[0];
         session?.compactionResults.push(completedCompaction());
-        await agent.compact(ctx, { await: true });
+        await agent.compact(ctx);
         await agent.waitForIdle();
         await agent.close();
 
         expect(insideResult).toMatchObject({
-            state: "rejected",
-            message: expect.stringContaining("cannot finish"),
+            state: "fulfilled",
         });
-        expect(session?.compactions).toHaveLength(1);
+        expect(session?.compactions).toHaveLength(2);
     });
 
     it("lets a tool abort its own turn and durably closes its call", async () => {
@@ -294,7 +293,7 @@ describe("self-reentrant tool calls", () => {
             initialState: { tools: [tool] },
         });
 
-        await agent.send(ctx, user("start"), { await: true });
+        await agent.send(ctx, user("start"));
         await agent.waitForIdle();
         const results = toolResults(persistence);
         const requests = provider.sessions[0]?.requests ?? [];
@@ -328,7 +327,7 @@ describe("self-reentrant tool calls", () => {
             initialState: { tools: [tool] },
         });
 
-        await agent.send(ctx, user("start"), { await: true });
+        await agent.send(ctx, user("start"));
         await agent.waitForIdle();
         await agent.close();
 
@@ -356,7 +355,7 @@ describe("self-reentrant tool calls", () => {
             initialState: { tools: [tool] },
         });
 
-        await agent.send(ctx, user("start"), { await: true });
+        await agent.send(ctx, user("start"));
         await agent.waitForIdle();
         const result = await observeWithin(closing, 200);
 
@@ -395,7 +394,7 @@ describe("self-reentrant tool calls", () => {
         manager = harness.manager;
         const agent = await manager.create(ctx, {});
 
-        await agent.send(ctx, user("start"), { await: true });
+        await agent.send(ctx, user("start"));
         await toolFinishedPromise;
         expect(closeResult).toMatchObject({
             state: "rejected",
@@ -450,7 +449,7 @@ describe("self-reentrant tool calls", () => {
         manager = harness.manager;
         const agent = await manager.create(ctx, {});
 
-        await agent.send(ctx, user("start"), { await: true });
+        await agent.send(ctx, user("start"));
         await toolStartedPromise;
         await manager.close(ctx);
         expect(released).toBe(true);
@@ -473,7 +472,7 @@ describe("self-reentrant tool calls", () => {
         manager = harness.manager;
         agent = await manager.create(ctx, {});
 
-        await agent.send(ctx, user("start"), { await: true });
+        await agent.send(ctx, user("start"));
         await agent.waitForIdle();
         await agent.close();
 
@@ -499,7 +498,7 @@ describe("self-reentrant tool calls", () => {
         manager = harness.manager;
         agent = await manager.create(ctx, {});
 
-        await agent.send(ctx, user("start"), { await: true });
+        await agent.send(ctx, user("start"));
         await agent.waitForIdle();
         const requests = provider.sessions[0]?.requests ?? [];
         await agent.close();
@@ -518,32 +517,29 @@ describe("self-reentrant tool calls", () => {
         ).toHaveLength(1);
     });
 
-    it("rejects manager compaction of the current tool's own agent without hanging", async () => {
+    it("requests manager compaction of the current tool's own agent without hanging", async () => {
         const persistence = new InMemoryPersistence();
         const provider = new ScriptedProvider([toolCallTurn(), textTurn("after tool")]);
         let manager!: AgentSystemLocal;
         let agent!: Agent;
         let compactResult!: Observed;
         const harness = await managerHarness(provider, persistence, async (callCtx) => {
-            compactResult = await observeWithin(
-                manager.compact(callCtx, agent.id, { await: true }),
-            );
+            compactResult = await observeWithin(manager.compact(callCtx, agent.id));
         });
         manager = harness.manager;
         agent = await manager.create(ctx, {});
 
-        await agent.send(ctx, user("start"), { await: true });
+        await agent.send(ctx, user("start"));
         await agent.waitForIdle();
         const session = provider.sessions[0];
         session?.compactionResults.push(completedCompaction());
-        await manager.compact(ctx, agent.id, { await: true });
+        await manager.compact(ctx, agent.id);
         await agent.waitForIdle();
         await agent.close();
 
         expect(compactResult).toMatchObject({
-            state: "rejected",
-            message: expect.stringContaining("cannot finish"),
+            state: "fulfilled",
         });
-        expect(session?.compactions).toHaveLength(1);
+        expect(session?.compactions).toHaveLength(2);
     });
 });

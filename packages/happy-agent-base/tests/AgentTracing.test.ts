@@ -117,7 +117,7 @@ describe("agent tracing", () => {
             persistence: new InMemoryPersistence(),
         });
 
-        await agent.send(ctx, user("hi"), { await: true });
+        await agent.send(ctx, user("hi"));
         await agent.waitForIdle();
         await agent.close();
 
@@ -144,7 +144,7 @@ describe("agent tracing", () => {
             persistence: new InMemoryPersistence(),
         });
 
-        await agent.send(ctx, user("private prompt"), { await: true });
+        await agent.send(ctx, user("private prompt"));
         await agent.waitForIdle();
         await agent.close();
 
@@ -184,7 +184,7 @@ describe("agent tracing", () => {
             initialState: { tools: [tool("first"), tool("second")] },
         });
 
-        await agent.send(ctx, user("use the tools"), { await: true });
+        await agent.send(ctx, user("use the tools"));
         await agent.waitForIdle();
         await agent.close();
 
@@ -218,11 +218,11 @@ describe("agent tracing", () => {
             persistence: new InMemoryPersistence(),
         });
 
-        await agent.send(ctx, user("hi"), { await: true });
+        await agent.send(ctx, user("hi"));
         await agent.waitForIdle();
         const session = provider.sessions[0] as ScriptedSession;
         session.compactionResults.push(completedCompaction());
-        await agent.compact(ctx, { await: true });
+        await agent.compact(ctx);
         await agent.waitForIdle();
         await agent.close();
 
@@ -246,7 +246,7 @@ describe("agent tracing", () => {
             },
         });
 
-        await agent.send(ctx, user("hi"), { await: true });
+        await agent.send(ctx, user("hi"));
         await agent.waitForIdle();
         await agent.close();
 
@@ -278,7 +278,7 @@ describe("agent tracing", () => {
         );
         const created = await ctx.span("caller", (callerCtx) => system.create(callerCtx, {}));
 
-        await system.send(ctx, created.id, user("hi"), { await: true });
+        await system.send(ctx, created.id, user("hi"));
         const agent = await system.resolve(ctx, created.id);
         await agent.waitForIdle();
         await agent.close();

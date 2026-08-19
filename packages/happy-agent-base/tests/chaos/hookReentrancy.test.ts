@@ -144,7 +144,7 @@ describe("hook and event re-entrancy", () => {
             },
         });
 
-        await agent.send(ctx, user("begin"), { await: true });
+        await agent.send(ctx, user("begin"));
         await selfSend;
         await agent.waitForIdle();
         const requests = provider.sessions[0]?.requests ?? [];
@@ -189,7 +189,7 @@ describe("hook and event re-entrancy", () => {
             },
         });
 
-        await agent.send(ctx, user("begin"), { await: true });
+        await agent.send(ctx, user("begin"));
         await Promise.all([steering, laterSend]);
         await agent.waitForIdle();
         const requests = provider.sessions[0]?.requests ?? [];
@@ -221,7 +221,7 @@ describe("hook and event re-entrancy", () => {
             },
         });
 
-        await agent.send(ctx, user("stop yourself"), { await: true });
+        await agent.send(ctx, user("stop yourself"));
         await aborting;
         await agent.waitForIdle();
         const terminalEvents = events.filter((event) => event.type === "done");
@@ -252,7 +252,7 @@ describe("hook and event re-entrancy", () => {
             },
         });
 
-        await agent.send(ctx, user("close from the stream"), { await: true });
+        await agent.send(ctx, user("close from the stream"));
         await hookEntered.promise;
         await closing;
         const terminalEvents = events.filter((event) => event.type === "done");
@@ -272,7 +272,7 @@ describe("hook and event re-entrancy", () => {
         });
     });
 
-    it("rejects compaction requested from onEvent without poisoning a later compaction", async () => {
+    it("schedules compaction requested from onEvent without waiting on its own turn", async () => {
         const provider = new ScriptedProvider([textTurn("ready")]);
         const originalSession = provider.session.bind(provider);
         provider.session = async (id: string, options: SessionOptions): Promise<BaseSession> => {
@@ -291,24 +291,22 @@ describe("hook and event re-entrancy", () => {
             hooks: {
                 onEvent: (hookCtx, event) => {
                     if (event.type === "done" && compacting === undefined) {
-                        compacting = outcomeOf(agent.compact(hookCtx, { await: true }));
+                        compacting = outcomeOf(agent.compact(hookCtx));
                         hookEntered.resolve();
                     }
                 },
             },
         });
 
-        await agent.send(ctx, user("compact when done"), { await: true });
+        await agent.send(ctx, user("compact when done"));
         await hookEntered.promise;
         const compactOutcome = await compacting;
-        await agent.waitForIdle();
-        await agent.compact(ctx, { await: true });
         await agent.waitForIdle();
         const compactions = provider.sessions[0]?.compactions.length;
         await agent.close();
 
         expect({ compactOutcome: compactOutcome?.status, compactions }).toEqual({
-            compactOutcome: "rejected",
+            compactOutcome: "fulfilled",
             compactions: 1,
         });
     });
@@ -340,7 +338,7 @@ describe("hook and event re-entrancy", () => {
             },
         });
 
-        await agent.send(ctx, user("begin"), { await: true });
+        await agent.send(ctx, user("begin"));
         await agent.waitForIdle();
         const requests = provider.sessions[0]?.requests ?? [];
         await agent.close();
@@ -372,7 +370,7 @@ describe("hook and event re-entrancy", () => {
             },
         });
 
-        await agent.send(ctx, user("abort in the hook"), { await: true });
+        await agent.send(ctx, user("abort in the hook"));
         await hookEntered.promise;
         const idle = await observedWithin(outcomeOf(agent.waitForIdle()));
 
@@ -408,7 +406,7 @@ describe("hook and event re-entrancy", () => {
             },
         });
 
-        await agent.send(ctx, user("begin"), { await: true });
+        await agent.send(ctx, user("begin"));
         await agent.waitForIdle();
         const requests = provider.sessions[0]?.requests ?? [];
         await agent.close();
@@ -443,7 +441,7 @@ describe("hook and event re-entrancy", () => {
             },
         });
 
-        await agent.send(ctx, user("close after the turn"), { await: true });
+        await agent.send(ctx, user("close after the turn"));
         await hookEntered.promise;
         const closed = await observedWithin(outcomeOf(agent.close()));
 
@@ -472,7 +470,7 @@ describe("hook and event re-entrancy", () => {
             },
         });
 
-        await agent.send(ctx, user("first request"), { await: true });
+        await agent.send(ctx, user("first request"));
         await selfSend;
         await agent.waitForIdle();
         const requests = provider.sessions[0]?.requests ?? [];
@@ -511,13 +509,13 @@ describe("hook and event re-entrancy", () => {
                 afterAgentSettled: async (hookCtx) => {
                     if (compacting !== undefined) return;
                     hookEntered.resolve();
-                    compacting = outcomeOf(agent.compact(hookCtx, { await: true }));
+                    compacting = outcomeOf(agent.compact(hookCtx));
                     await compacting;
                 },
             },
         });
 
-        await agent.send(ctx, user("compact once settled"), { await: true });
+        await agent.send(ctx, user("compact once settled"));
         await hookEntered.promise;
         if (compacting === undefined)
             throw new Error("The settle hook did not request compaction.");
@@ -558,7 +556,7 @@ describe("hook and event re-entrancy", () => {
         const agent = await owner.create(ctx, {});
         await agent.waitForIdle();
 
-        await owner.send(ctx, agent.id, user("switch"), { await: true, model: "openai/gpt" });
+        await owner.send(ctx, agent.id, user("switch"), { model: "openai/gpt" });
         await hookEntered.promise;
         const idle = await observedWithin(outcomeOf(agent.waitForIdle()));
 
@@ -599,7 +597,7 @@ describe("hook and event re-entrancy", () => {
         targetId = target.id;
         await Promise.all([source.waitForIdle(), target.waitForIdle()]);
 
-        await owner.send(ctx, source.id, user("switch"), { await: true, model: "openai/gpt" });
+        await owner.send(ctx, source.id, user("switch"), { model: "openai/gpt" });
         const observed = await observedWithin(
             outcomeOf(Promise.all([source.waitForIdle(), target.waitForIdle()])),
         );

@@ -52,7 +52,7 @@ describe("a failed run", () => {
             },
         });
 
-        await agent.send(ctx, user("do the work"), { await: true });
+        await agent.send(ctx, user("do the work"));
         await agent.waitForIdle();
 
         expect(settlements).toHaveLength(1);
@@ -81,7 +81,7 @@ describe("a failed run", () => {
             },
         });
 
-        await agent.send(ctx, user("do the work"), { await: true });
+        await agent.send(ctx, user("do the work"));
         await agent.waitForIdle();
 
         // Without settling, this agent would be recorded as working for ever: the loop is over,
@@ -111,7 +111,7 @@ describe("a failed run", () => {
 
         // The system message describing the failure cannot be written, so the settlement is the
         // only place the failure exists at all.
-        await agent.send(ctx, user("do the work"), { await: true });
+        await agent.send(ctx, user("do the work"));
         await agent.waitForIdle();
 
         expect(settlements[0]?.error).toBe("upstream fell over");
@@ -137,9 +137,9 @@ describe("a failed run", () => {
             },
         });
 
-        await agent.send(ctx, user("first"), { await: true });
+        await agent.send(ctx, user("first"));
         await agent.waitForIdle();
-        await agent.send(ctx, user("second"), { await: true });
+        await agent.send(ctx, user("second"));
         await agent.waitForIdle();
 
         expect(settlements).toHaveLength(2);
@@ -165,7 +165,7 @@ describe("a failed run", () => {
             },
         });
 
-        await agent.send(ctx, user("do the work"), { await: true });
+        await agent.send(ctx, user("do the work"));
         await agent.waitForIdle();
 
         expect(settlements).toHaveLength(1);

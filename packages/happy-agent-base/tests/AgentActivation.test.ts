@@ -52,7 +52,7 @@ describe("activation hook", () => {
             },
         });
 
-        await agent.send(ctx, user("question"), { await: true });
+        await agent.send(ctx, user("question"));
         // The announcement happened when the message was scheduled, before any turn consumed it.
         expect(order).toEqual(["activated restored=false"]);
         await agent.waitForIdle();
@@ -86,16 +86,16 @@ describe("activation hook", () => {
             },
         });
 
-        await agent.send(ctx, user("first"), { await: true });
+        await agent.send(ctx, user("first"));
         await inferenceStarted.promise;
         // A message scheduled onto an agent that is already working does not activate it again.
-        await agent.steer(ctx, user("second"), { await: true });
+        await agent.steer(ctx, user("second"));
         releaseInference.resolve();
         await agent.waitForIdle();
         expect(activations).toEqual([false]);
 
         // Settled and asked again: this is a fresh activation.
-        await agent.send(ctx, user("third"), { await: true });
+        await agent.send(ctx, user("third"));
         await agent.waitForIdle();
         expect(activations).toEqual([false, false]);
         await agent.close();
@@ -144,7 +144,7 @@ describe("activation hook", () => {
             },
         });
 
-        await expect(agent.send(ctx, user("question"), { await: true })).rejects.toThrow(
+        await expect(agent.send(ctx, user("question"))).rejects.toThrow(
             "the activation hook failed",
         );
 

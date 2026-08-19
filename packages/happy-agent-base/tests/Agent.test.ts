@@ -73,7 +73,7 @@ describe("Agent", () => {
             modules: [module({ name: "publishing", tools: () => [reviewedTool] })],
         });
 
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await agent.waitForIdle();
 
         const assembled = provider.sessions[0]?.options.tools?.[0];
@@ -115,7 +115,7 @@ describe("Agent", () => {
             modules: [searchModule, editModule],
         });
 
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await agent.waitForIdle();
 
         const session = provider.sessions[0];
@@ -169,7 +169,7 @@ describe("Agent", () => {
             ],
         });
 
-        await agent.send(ctx, user("mutate"), { await: true });
+        await agent.send(ctx, user("mutate"));
         await agent.waitForIdle();
 
         expect(executions).toBe(1);
@@ -235,7 +235,7 @@ describe("Agent", () => {
             ],
         });
 
-        await agent.send(ctx, user("mutate"), { await: true });
+        await agent.send(ctx, user("mutate"));
         await agent.waitForIdle();
 
         expect(executions).toBe(0);
@@ -268,7 +268,7 @@ describe("Agent", () => {
             modules: [observe("first"), observe("second")],
         });
 
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await agent.waitForIdle();
 
         expect(seen).toEqual(["first", "second"]);
@@ -310,7 +310,7 @@ describe("Agent", () => {
             ],
         });
 
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await agent.waitForIdle();
 
         expect(order).toEqual(["first:text_end", "second:text_end"]);
@@ -348,7 +348,7 @@ describe("Agent", () => {
             modules: [followUp("from first"), followUp("from second"), stop],
         });
 
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await agent.waitForIdle();
 
         // Both modules' actions were applied together and drained into one follow-up turn.
@@ -392,9 +392,9 @@ describe("Agent", () => {
             modules: [silent, summarizer, late],
         });
 
-        await agent.send(ctx, user("hello"), { await: true });
+        await agent.send(ctx, user("hello"));
         await agent.waitForIdle();
-        await agent.send(ctx, user("switch"), { await: true, model: "openai/gpt" });
+        await agent.send(ctx, user("switch"), { model: "openai/gpt" });
         await agent.waitForIdle();
 
         expect(observed).toEqual([true, true]);
@@ -442,7 +442,7 @@ describe("Agent", () => {
             modules: [broken, working],
         });
 
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await agent.waitForIdle();
 
         // The broken module silenced nothing: the working module observed both turns and
@@ -472,7 +472,7 @@ describe("Agent", () => {
             ],
         });
 
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await agent.waitForIdle();
 
         expect(provider.sessions[0]?.options.instructions).toBe("async instructions");
@@ -499,9 +499,9 @@ describe("Agent", () => {
             modules: [broken],
         });
 
-        await agent.send(ctx, user("hello"), { await: true });
+        await agent.send(ctx, user("hello"));
         await agent.waitForIdle();
-        await agent.send(ctx, user("switch"), { await: true, model: "openai/gpt" });
+        await agent.send(ctx, user("switch"), { model: "openai/gpt" });
         await agent.waitForIdle();
 
         // The failed handoff rejected the switch: the history survived and the previous
@@ -542,7 +542,7 @@ describe("Agent", () => {
             ],
         });
 
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await agent.waitForIdle();
 
         expect(provider.sessions).toHaveLength(0);
@@ -568,7 +568,7 @@ describe("Agent", () => {
             ],
         });
 
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await agent.waitForIdle();
 
         // No module implements instructions, so the mutable state answers as usual.
@@ -610,7 +610,7 @@ describe("Agent", () => {
             modules: [memory, other],
         });
 
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await agent.waitForIdle();
 
         expect(persistence.values.get("kv.test-agent.module.memory.note")).toBe("remembered");
@@ -640,7 +640,7 @@ describe("Agent", () => {
             ],
         });
 
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await agent.waitForIdle();
 
         expect(seen[0]).toEqual({
@@ -689,9 +689,9 @@ describe("Agent", () => {
             modules: [notes],
         });
 
-        await agent.send(ctx, user("first"), { await: true });
+        await agent.send(ctx, user("first"));
         await agent.waitForIdle();
-        await agent.send(ctx, user("second"), { await: true });
+        await agent.send(ctx, user("second"));
         await agent.waitForIdle();
 
         expect(withinRun).toEqual(["run 1", "run 2"]);
@@ -731,7 +731,7 @@ describe("Agent", () => {
             modules: [first, second],
         });
 
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await agent.waitForIdle();
 
         expect(observed).toEqual([undefined, undefined]);
@@ -787,7 +787,7 @@ describe("Agent", () => {
             modules: [lifecycle("first"), lifecycle("second")],
         });
 
-        await agent.compact(ctx, { await: true });
+        await agent.compact(ctx);
         await agent.waitForIdle();
 
         expect(order).toEqual([

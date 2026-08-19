@@ -65,9 +65,9 @@ describe("lifecycle concurrency", () => {
             },
         });
 
-        await agent.send(ctx, user("do not start inference"), { await: true });
+        await agent.send(ctx, user("do not start inference"));
         await beforeTurnStarted.promise;
-        const aborting = agent.abort(ctx, { await: true });
+        const aborting = agent.abort(ctx);
         releaseBeforeTurn.resolve();
         await aborting;
         await agent.waitForIdle();
@@ -112,11 +112,11 @@ describe("lifecycle concurrency", () => {
             provider: "scripted",
             persistence: new InMemoryPersistence(),
         });
-        await agent.send(ctx, user("hold the response open"), { await: true });
+        await agent.send(ctx, user("hold the response open"));
         await streamStarted.promise;
 
         let compactionSettlement: "pending" | "resolved" | "rejected" = "pending";
-        const compaction = agent.compact(ctx, { await: true }).then(
+        const compaction = agent.compact(ctx).then(
             () => {
                 compactionSettlement = "resolved";
             },
@@ -124,7 +124,7 @@ describe("lifecycle concurrency", () => {
                 compactionSettlement = "rejected";
             },
         );
-        const aborting = agent.abort(ctx, { await: true });
+        const aborting = agent.abort(ctx);
         await flushMicrotasks();
         // Let both the current fire-and-forget cleanup and a future awaited cleanup finish. The
         // compaction promise must settle independently of which cleanup policy the stream uses.
@@ -218,9 +218,9 @@ describe("lifecycle concurrency", () => {
             provider: "scripted",
             persistence: new InMemoryPersistence(),
         });
-        await agent.send(ctx, user("first"), { await: true });
+        await agent.send(ctx, user("first"));
         await firstRunStarted.promise;
-        await agent.send(ctx, user("second"), { await: true });
+        await agent.send(ctx, user("second"));
         allowFirstDone.resolve();
 
         await cleanupStarted.promise;
@@ -315,11 +315,11 @@ describe("lifecycle concurrency", () => {
             },
         });
 
-        await agent.send(ctx, user("start the tool"), { await: true });
+        await agent.send(ctx, user("start the tool"));
         await toolStarted.promise;
-        const aborting = agent.abort(ctx, { await: true });
+        const aborting = agent.abort(ctx);
         await cleanupStarted.promise;
-        await agent.send(ctx, user("run only after cleanup"), { await: true });
+        await agent.send(ctx, user("run only after cleanup"));
         const secondInferenceStartedBeforeCleanupReleased = await settlesWhileBlocked(
             secondInferenceStarted.promise,
         );
@@ -365,7 +365,7 @@ describe("lifecycle concurrency", () => {
             provider: "scripted",
             persistence: disk,
         });
-        const sending = agent.send(ctx, user("already admitted"), { await: true });
+        const sending = agent.send(ctx, user("already admitted"));
         await writeStarted.promise;
 
         let closeSettled = false;

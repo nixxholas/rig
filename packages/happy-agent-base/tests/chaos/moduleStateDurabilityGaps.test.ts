@@ -35,9 +35,9 @@ describe("module and metadata durability gaps", () => {
             },
         });
 
-        await live.send(ctx, user("first"), { await: true });
+        await live.send(ctx, user("first"));
         await live.waitForIdle();
-        await live.send(ctx, user("second"), { await: true });
+        await live.send(ctx, user("second"));
         await live.waitForIdle();
         await live.close();
 

@@ -52,7 +52,7 @@ describe("durability of a model switch under crashes", () => {
             let queued = text === undefined;
             try {
                 if (text !== undefined) {
-                    await agent.send(ctx, user(text), { ...options, await: true });
+                    await agent.send(ctx, user(text), { ...options });
                     queued = true;
                 }
                 agent.start();

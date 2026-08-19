@@ -56,7 +56,7 @@ async function agentWorkContext(
     });
     // Delivery happens after the creating call has committed and returned, so it is made from a
     // context of its own — the agent refuses to be spoken to from inside an open transaction.
-    await agent.send(createRootContext().named("later"), user("hi"), { await: true });
+    await agent.send(createRootContext().named("later"), user("hi"));
     await agent.waitForIdle();
     if (captured === undefined) throw new Error("The instructions hook was never called.");
     return { captured, agent };
@@ -100,7 +100,7 @@ describe("agent context detachment", () => {
         // The call returns and takes its cancellation with it. What it started keeps running.
         abort.abort();
 
-        await agent.send(createRootContext().named("later"), user("hi"), { await: true });
+        await agent.send(createRootContext().named("later"), user("hi"));
         await agent.waitForIdle();
         await agent.close();
 

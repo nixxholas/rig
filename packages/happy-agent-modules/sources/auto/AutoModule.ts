@@ -464,7 +464,6 @@ export class AutoModule implements AgentModule {
         request.signal.addEventListener("abort", onAbort, { once: true });
         try {
             await system.send(this.#privateDbContext(), reviewerId, message, {
-                await: true,
                 permissionMode: "read_only",
                 provider: route.providerId,
                 model: route.modelId,

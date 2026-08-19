@@ -2,12 +2,7 @@ import type { SessionSystemMessage } from "@slopus/happy-providers";
 import type { Context } from "@steve.kite/stdlib";
 
 import { agentConfig } from "./AgentConfig.js";
-import {
-    AgentBase,
-    type AgentBaseAwaitOptions,
-    type AgentBaseMessageOptions,
-    type AgentBaseOptions,
-} from "./AgentBase.js";
+import { AgentBase, type AgentBaseMessageOptions, type AgentBaseOptions } from "./AgentBase.js";
 import {
     agentDatabase,
     agentEffort,
@@ -161,7 +156,7 @@ export class Agent<
     async steer(
         ctx: Context,
         message: AgentQueuedMessage,
-        options?: AgentBaseMessageOptions & AgentBaseAwaitOptions,
+        options?: AgentBaseMessageOptions,
     ): Promise<AgentMessageAcceptance> {
         return await this.#base.steer(ctx, message, options);
     }
@@ -170,7 +165,7 @@ export class Agent<
     async send(
         ctx: Context,
         message: AgentQueuedMessage,
-        options?: AgentBaseMessageOptions & AgentBaseAwaitOptions,
+        options?: AgentBaseMessageOptions,
     ): Promise<AgentMessageAcceptance> {
         return await this.#base.send(ctx, message, options);
     }
@@ -191,13 +186,13 @@ export class Agent<
     }
 
     /** Ask for the conversation to be replaced by the provider's summary of it. */
-    async compact(ctx: Context, options?: AgentBaseAwaitOptions): Promise<void> {
-        await this.#base.compact(ctx, options);
+    async compact(ctx: Context): Promise<void> {
+        await this.#base.compact(ctx);
     }
 
     /** Cancel the active turn, leaving queued messages durable for the next one. */
-    async abort(ctx: Context, options?: AgentBaseAwaitOptions): Promise<void> {
-        await this.#base.abort(ctx, options);
+    async abort(ctx: Context): Promise<void> {
+        await this.#base.abort(ctx);
     }
 
     /** Finish everything already accepted, then destroy the provider session. */

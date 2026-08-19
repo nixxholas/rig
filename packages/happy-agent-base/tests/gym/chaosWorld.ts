@@ -167,24 +167,20 @@ export async function runProcess(
                 content: [{ type: "text" as const, text: message.text }],
             };
             if (message.steering === true) {
-                await agent.steer(ctx, content, { ...message.options, await: true });
+                await agent.steer(ctx, content, { ...message.options });
             } else {
-                await agent.send(ctx, content, { ...message.options, await: true });
+                await agent.send(ctx, content, { ...message.options });
             }
             queued += 1;
         }
         if (options.compaction !== undefined) {
             // The compaction is requested, not awaited: the turn carries it out, and a crash
             // during it must leave the conversation whole either way.
-            void agent.compact(ctx, { await: true }).then(
-                () => {
-                    compacted = true;
-                },
-                () => undefined,
-            );
+            void agent.compact(ctx);
         }
         agent.start();
         await agent.waitForIdle();
+        compacted = world.disk.records.some((record) => record.type === "compaction");
         if (!persistence.crashed) await agent.close();
         return {
             crashed: persistence.crashed,
@@ -194,7 +190,12 @@ export async function runProcess(
         };
     } catch (error: unknown) {
         if (!isCrash(error) && !persistence.crashed) throw error;
-        return { crashed: true, queued, lastDone: dones[dones.length - 1], compacted };
+        return {
+            crashed: true,
+            queued,
+            lastDone: dones[dones.length - 1],
+            compacted: world.disk.records.some((record) => record.type === "compaction"),
+        };
     }
 }
 

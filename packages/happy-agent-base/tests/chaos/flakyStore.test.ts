@@ -49,7 +49,7 @@ describe("durability under a flaky store", () => {
             // A send either resolves, and the message is the agent's responsibility from then
             // on, or throws, and the caller knows it was never accepted.
             try {
-                await agent.send(ctx, user(text), { await: true });
+                await agent.send(ctx, user(text));
                 accepted.push(text);
             } catch {
                 // The caller would retry; this scenario deliberately does not, so that a

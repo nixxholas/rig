@@ -227,7 +227,7 @@ describe("AgentSystemRef", () => {
         const reference = new AgentSystemRef(system);
 
         const agent = await system.create(ctx, {});
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await agent.waitForIdle();
         await system.delete(ctx, agent.id);
 
@@ -266,7 +266,7 @@ describe("AgentSystemRef", () => {
         const reference = new AgentSystemRef(system);
 
         const agent = await system.create(ctx, {});
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await agent.waitForIdle();
         await system.delete(ctx, agent.id);
 

@@ -2,7 +2,7 @@ import type { SessionMessage } from "@slopus/happy-providers";
 import type { Context } from "@steve.kite/stdlib";
 
 import type { Agent } from "./Agent.js";
-import type { AgentBaseAwaitOptions, AgentBaseMessageOptions } from "./AgentBase.js";
+import type { AgentBaseMessageOptions } from "./AgentBase.js";
 import type { AgentConfig } from "./AgentConfig.js";
 import type { AgentDatabase } from "./AgentDatabase.js";
 import type { AgentMetadata } from "./AgentMetadata.js";
@@ -85,7 +85,7 @@ export interface AgentSystem<Database extends AgentDatabase = AgentDatabase> {
         ctx: Context,
         agentId: string,
         message: AgentQueuedMessage,
-        options?: AgentBaseMessageOptions & AgentBaseAwaitOptions,
+        options?: AgentBaseMessageOptions,
     ): Promise<AgentMessageAcceptance>;
 
     /** Queue a message for an agent that injects only when the agent would otherwise stop. */
@@ -93,12 +93,12 @@ export interface AgentSystem<Database extends AgentDatabase = AgentDatabase> {
         ctx: Context,
         agentId: string,
         message: AgentQueuedMessage,
-        options?: AgentBaseMessageOptions & AgentBaseAwaitOptions,
+        options?: AgentBaseMessageOptions,
     ): Promise<AgentMessageAcceptance>;
 
     /** Cancel an agent's active turn, leaving its queued messages durable for the next one. */
-    abort(ctx: Context, agentId: string, options?: AgentBaseAwaitOptions): Promise<void>;
+    abort(ctx: Context, agentId: string): Promise<void>;
 
     /** Ask an agent for its conversation to be replaced by the provider's summary of it. */
-    compact(ctx: Context, agentId: string, options?: AgentBaseAwaitOptions): Promise<void>;
+    compact(ctx: Context, agentId: string): Promise<void>;
 }

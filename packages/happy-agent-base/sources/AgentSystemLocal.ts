@@ -11,11 +11,7 @@ import {
 } from "@steve.kite/stdlib";
 
 import { Agent } from "./Agent.js";
-import {
-    type AgentBaseAwaitOptions,
-    type AgentBaseMessageOptions,
-    type AgentBaseQueueMode,
-} from "./AgentBase.js";
+import { type AgentBaseMessageOptions, type AgentBaseQueueMode } from "./AgentBase.js";
 import {
     agentDatabase,
     agentId as agentIdOf,
@@ -59,6 +55,11 @@ type AgentLifecycleHook<Database extends AgentDatabase> = (
     scope: AgentModuleSystemScope<Database>,
     agent: AgentModuleAgentLifecycle,
 ) => void | Promise<void>;
+
+interface TransactionAgentEntry<Database extends AgentDatabase> {
+    readonly agent: Agent<AnyAgentTool, Database>;
+    start: boolean;
+}
 
 /** Everything `AgentSystemLocal` needs to build and run the agents in its collection. */
 export interface AgentSystemLocalOptions<Database extends AgentDatabase = AgentDatabase> {
@@ -137,10 +138,10 @@ export class AgentSystemLocal<
     readonly #sharedModuleKV: AgentKV;
     /** The live `Agent` instances this process has built, keyed by identity. */
     readonly #agents = new Map<string, Agent<AnyAgentTool, Database>>();
-    /** Unpublished agents built once per transaction for delivery to an unloaded target. */
+    /** Unpublished agents built once per transaction and made live only after commit. */
     readonly #transactionAgents = new WeakMap<
         AgentStorageTransactionContext,
-        Map<string, Agent<AnyAgentTool, Database>>
+        Map<string, TransactionAgentEntry<Database> | null>
     >();
     // One agent has one store for the life of the collection, so inspecting an agent's durable
     // work and running that agent never end up looking at two different stores.
@@ -151,6 +152,8 @@ export class AgentSystemLocal<
     readonly #admitted = new Set<Promise<void>>();
     /** Post-commit lifecycle observations still running outside per-agent locks. */
     readonly #lifecycleObservations = new Set<Promise<void>>();
+    /** Post-commit closes and replacement resets that must finish before an ID is reused. */
+    readonly #transitions = new Map<string, Promise<void>>();
     /** No agent operation is admitted until every module has finished its beforeStart hook. */
     #lifecycle: "initializing" | "open" | "closing" | "closed" = "initializing";
     /** The shared shutdown, including release of the hard storage lock. */
@@ -226,7 +229,16 @@ export class AgentSystemLocal<
      * release the database lock. Repeated callers join the same shutdown.
      */
     async close(ctx: Context): Promise<void> {
-        this.#assertOutsideStorageTransaction(ctx, "closed");
+        if (agentStorageTransaction(ctx) !== undefined) {
+            afterCommit(ctx, () => {
+                outsideAgentDatabaseOperation(() => {
+                    void this.close(this.#ctx).catch((error: unknown) => {
+                        this.#ctx.log.warn("The committed agent system close failed.", error);
+                    });
+                });
+            });
+            return;
+        }
         if (this.#closePromise === undefined) {
             this.#lifecycle = "closing";
             this.#closePromise = this.#shutdown();
@@ -247,8 +259,8 @@ export class AgentSystemLocal<
     /** The real shutdown barrier, which keeps the hard store lock until every agent is closed. */
     async #shutdown(): Promise<void> {
         try {
-            while (this.#admitted.size > 0) {
-                await Promise.allSettled(this.#admitted);
+            while (this.#admitted.size > 0 || this.#transitions.size > 0) {
+                await Promise.allSettled([...this.#admitted, ...this.#transitions.values()]);
             }
             const closed = [...this.#agents.values()].map((agent) => {
                 void agent.close().catch(() => undefined);
@@ -314,12 +326,13 @@ export class AgentSystemLocal<
         config: AgentConfig,
         options?: AgentCreateOptions,
     ): Promise<Agent<AnyAgentTool, Database>> {
-        this.#assertOutsideStorageTransaction(ctx, "created");
         return await this.#admit(async () => {
             const agentId = options?.id ?? createId();
             if (!Value.Check(cuid2Schema, agentId)) {
                 throw new Error("The agent ID must be a cuid2 identity.");
             }
+            await this.#waitForTransition(ctx, agentId);
+            this.#assertNotDeletedInTransaction(ctx, agentId);
             if (!Value.Check(agentConfigSchema, config)) {
                 throw new Error(`The configuration for agent "${agentId}" is not valid.`);
             }
@@ -339,7 +352,7 @@ export class AgentSystemLocal<
             // Provenance is the system's to state, so a caller cannot claim a different one.
             const owned = ownAgentConfig({ ...config, provenance });
             const lifecycle = lifecycleAgent(agentId, owned);
-            return await this.#lockFor(agentId).runInLock(ctx, async (lockCtx) => {
+            const create = async (lockCtx: Context): Promise<Agent<AnyAgentTool, Database>> => {
                 if ((await this.#configs.read(lockCtx, agentId)) !== undefined) {
                     throw new Error(`Agent "${agentId}" already exists.`);
                 }
@@ -371,10 +384,17 @@ export class AgentSystemLocal<
                         (hooks) => hooks.agentCreated,
                     );
                 });
-                const agent = await this.#instantiate(agentId, owned);
+                const agent =
+                    agentStorageTransaction(lockCtx) === undefined
+                        ? await this.#instantiate(agentId, owned)
+                        : await this.#transactionAgent(lockCtx, agentId, owned, true, true);
                 if (agent === undefined) throw new Error(`Agent "${agentId}" could not be built.`);
                 return agent;
-            });
+            };
+            // A carried transaction already serializes the database and must not wait for an
+            // identity lock whose current owner may itself be queued behind that transaction.
+            if (agentStorageTransaction(ctx) !== undefined) return await create(ctx);
+            return await this.#lockFor(agentId).runInLock(ctx, create);
         });
     }
 
@@ -389,13 +409,27 @@ export class AgentSystemLocal<
      * what clears it.
      */
     async delete(ctx: Context, agentId: string): Promise<void> {
-        this.#assertOutsideStorageTransaction(ctx, "archived");
         await this.#admit(async () => {
-            await this.#lockFor(agentId).runInLock(ctx, async (lockCtx) => {
+            await this.#waitForTransition(ctx, agentId);
+            const remove = async (lockCtx: Context): Promise<void> => {
                 const config = await this.#config(lockCtx, agentId);
-                const agent = this.#agents.get(agentId);
-                this.#agents.delete(agentId);
-                await agent?.close();
+                const transaction = agentStorageTransaction(lockCtx);
+                let provisional: Map<string, TransactionAgentEntry<Database> | null> | undefined;
+                if (transaction !== undefined) {
+                    provisional = this.#transactionAgents.get(transaction);
+                    if (provisional === undefined) {
+                        provisional = new Map();
+                        this.#transactionAgents.set(transaction, provisional);
+                    }
+                }
+                const staged = provisional?.get(agentId);
+                const agent =
+                    (staged === null || staged === undefined ? undefined : staged.agent) ??
+                    this.#agents.get(agentId);
+                if (transaction === undefined) {
+                    this.#agents.delete(agentId);
+                    await agent?.close();
+                }
                 await this.#configs.transaction(lockCtx, async (_configs, txCtx) => {
                     await this.#configs.delete(txCtx, agentId);
                     await this.#parents.delete(txCtx, agentId);
@@ -412,8 +446,26 @@ export class AgentSystemLocal<
                         );
                     }
                 });
-                this.#persistences.delete(agentId);
-            });
+                provisional?.set(agentId, null);
+                if (transaction === undefined) {
+                    this.#persistences.delete(agentId);
+                } else {
+                    afterCommit(lockCtx, () => {
+                        outsideAgentDatabaseOperation(() => {
+                            if (this.#agents.get(agentId) === agent) this.#agents.delete(agentId);
+                            this.#beginTransition(agentId, async () => {
+                                await agent?.close();
+                                this.#persistences.delete(agentId);
+                            });
+                        });
+                    });
+                }
+            };
+            if (agentStorageTransaction(ctx) !== undefined) {
+                await remove(ctx);
+            } else {
+                await this.#lockFor(agentId).runInLock(ctx, remove);
+            }
         });
     }
 
@@ -450,6 +502,7 @@ export class AgentSystemLocal<
 
     /** Read one stored configuration while its owning operation is already admitted. */
     async #config(ctx: Context, agentId: string): Promise<AgentConfig | undefined> {
+        await this.#waitForTransition(ctx, agentId);
         const indexed = await this.#configs.read(ctx, agentId);
         if (indexed === undefined) return undefined;
         const local = await this.#persistenceFor(agentId).readValues(ctx, "agentConfig");
@@ -462,7 +515,6 @@ export class AgentSystemLocal<
 
     /** Shallow-merge fields into one agent's immutable metadata. */
     async updateMetadata(ctx: Context, agentId: string, update: AgentMetadata): Promise<void> {
-        this.#assertOutsideStorageTransaction(ctx, "updated");
         await this.#admit(async () => {
             const agent = await this.#resolve(ctx, agentId);
             await agent.updateMetadata(ctx, update);
@@ -504,27 +556,19 @@ export class AgentSystemLocal<
      * Concurrent resolutions of the same ID share one load.
      */
     async resolve(ctx: Context, agentId: string): Promise<Agent<AnyAgentTool, Database>> {
-        this.#assertOutsideStorageTransaction(ctx, "resolved");
         return await this.#admit(async () => await this.#resolve(ctx, agentId));
-    }
-
-    /**
-     * Creating or removing a live Agent object is a lifetime operation that cannot roll back
-     * with an enclosing transaction. Keep those operations outside host-owned transactions;
-     * durable storage, module hooks, and message delivery — which loads an idle target without
-     * starting it — remain composable.
-     */
-    #assertOutsideStorageTransaction(ctx: Context, operation: string): void {
-        if (agentStorageTransaction(ctx) !== undefined) {
-            throw new Error(
-                `An agent cannot be ${operation} from inside an outer storage transaction.`,
-            );
-        }
     }
 
     /** Resolve one agent while its owning public operation is already admitted. */
     async #resolve(ctx: Context, agentId: string): Promise<Agent<AnyAgentTool, Database>> {
-        this.#assertOutsideStorageTransaction(ctx, "resolved");
+        await this.#waitForTransition(ctx, agentId);
+        if (agentStorageTransaction(ctx) !== undefined) {
+            const config = await this.#config(ctx, agentId);
+            if (config === undefined) {
+                throw new Error(`Agent "${agentId}" has not been created.`);
+            }
+            return await this.#transactionAgent(ctx, agentId, config, true);
+        }
         const existing = this.#agents.get(agentId);
         if (existing !== undefined) return existing;
 
@@ -558,6 +602,7 @@ export class AgentSystemLocal<
         start = true,
         loadCtx?: Context,
         publish = true,
+        fresh = false,
     ): Promise<Agent<AnyAgentTool, Database> | undefined> {
         // An agent outlives whatever asked for it — a restart bringing the collection up, an HTTP
         // request, another agent's tool — so it takes no context from its caller at all and is
@@ -583,7 +628,9 @@ export class AgentSystemLocal<
         // resolves through — so the agent is loaded rather than created, and knows whether it
         // has work left before anything asks it. Bringing a collection up asks only for the
         // agents that do; anything else resolving an agent wants it whether it owes work or not.
-        const agent = await Agent.load(agentCtx, options, loadCtx);
+        const agent = fresh
+            ? await Agent.create(agentCtx, options)
+            : await Agent.load(agentCtx, options, loadCtx);
         if (onlyIfActive && !agent.active) {
             await agent.close();
             return undefined;
@@ -759,12 +806,55 @@ export class AgentSystemLocal<
         return created;
     }
 
+    /** Wait for an earlier incarnation of this identity to finish handing off its store. */
+    async #waitForTransition(ctx: Context, agentId: string): Promise<void> {
+        const transition = this.#transitions.get(agentId);
+        if (transition === undefined) return;
+        // A transition may itself need the database after an active turn unwinds. Waiting from
+        // a transaction would keep that database slot occupied and deadlock the handoff.
+        if (agentStorageTransaction(ctx) !== undefined) {
+            throw new Error(
+                `Agent "${agentId}" is still finishing deletion and cannot be used by a ` +
+                    "storage transaction yet.",
+            );
+        }
+        await transition;
+    }
+
+    /** Reusing a staged deletion would mix two live incarnations in one transaction. */
+    #assertNotDeletedInTransaction(ctx: Context, agentId: string): void {
+        const transaction = agentStorageTransaction(ctx);
+        if (transaction === undefined) return;
+        if (this.#transactionAgents.get(transaction)?.get(agentId) !== null) return;
+        throw new Error(
+            `Agent "${agentId}" cannot be recreated until its deleting transaction commits.`,
+        );
+    }
+
+    /** Serialize one post-commit identity handoff without keeping the committing database slot. */
+    #beginTransition(agentId: string, work: () => Promise<void>): void {
+        const previous = this.#transitions.get(agentId);
+        const transition = (previous === undefined ? Promise.resolve() : previous)
+            .catch(() => undefined)
+            .then(work);
+        this.#transitions.set(agentId, transition);
+        void transition
+            .catch((error: unknown) => {
+                this.#ctx.log.warn(`The transition for agent "${agentId}" failed.`, error);
+            })
+            .finally(() => {
+                if (this.#transitions.get(agentId) === transition) {
+                    this.#transitions.delete(agentId);
+                }
+            });
+    }
+
     /** Queue a steered message for an agent. */
     async steer(
         ctx: Context,
         agentId: string,
         message: AgentQueuedMessage,
-        options?: AgentBaseMessageOptions & AgentBaseAwaitOptions,
+        options?: AgentBaseMessageOptions,
     ): Promise<AgentMessageAcceptance> {
         return await this.#admit(async () => {
             const agent = await this.#messageTarget(ctx, agentId);
@@ -777,7 +867,7 @@ export class AgentSystemLocal<
         ctx: Context,
         agentId: string,
         message: AgentQueuedMessage,
-        options?: AgentBaseMessageOptions & AgentBaseAwaitOptions,
+        options?: AgentBaseMessageOptions,
     ): Promise<AgentMessageAcceptance> {
         return await this.#admit(async () => {
             const agent = await this.#messageTarget(ctx, agentId);
@@ -794,39 +884,69 @@ export class AgentSystemLocal<
     async #messageTarget(ctx: Context, agentId: string): Promise<Agent<AnyAgentTool, Database>> {
         const transaction = agentStorageTransaction(ctx);
         if (transaction === undefined) return await this.#resolve(ctx, agentId);
-        const existing = this.#agents.get(agentId);
-        if (existing !== undefined) return existing;
+        const config = await this.#config(ctx, agentId);
+        if (config === undefined) {
+            throw new Error(`Agent "${agentId}" has not been created.`);
+        }
+        return await this.#transactionAgent(ctx, agentId, config, false);
+    }
+
+    /**
+     * Load one transaction-local agent through the carried database facade. Every operation in
+     * the same transaction reuses it, and commit publishes it with the strongest requested start
+     * behavior; rollback drops the publication callback.
+     */
+    async #transactionAgent(
+        ctx: Context,
+        agentId: string,
+        config: AgentConfig,
+        start: boolean,
+        fresh = false,
+    ): Promise<Agent<AnyAgentTool, Database>> {
+        const transaction = agentStorageTransaction(ctx);
+        if (transaction === undefined) {
+            throw new Error("A transaction-local agent requires an agent storage transaction.");
+        }
         let provisional = this.#transactionAgents.get(transaction);
         if (provisional === undefined) {
             provisional = new Map();
             this.#transactionAgents.set(transaction, provisional);
         }
         const cached = provisional.get(agentId);
-        if (cached !== undefined) return cached;
-        const config = await this.#config(ctx, agentId);
-        if (config === undefined) {
-            throw new Error(`Agent "${agentId}" has not been created.`);
+        if (cached !== undefined && cached !== null) {
+            cached.start ||= start;
+            return cached.agent;
         }
-        const agent = await this.#instantiate(agentId, config, false, false, ctx, false);
-        if (agent === undefined) throw new Error(`Agent "${agentId}" could not be built.`);
+        if (cached === null) {
+            throw new Error(
+                `Agent "${agentId}" cannot be resolved after deletion in the same transaction.`,
+            );
+        }
         const concurrent = this.#agents.get(agentId);
         if (concurrent !== undefined) return concurrent;
-        provisional.set(agentId, agent);
-        afterCommit(ctx, () => this.#publish(agent, false));
+        const agent = await this.#instantiate(agentId, config, false, false, ctx, false, fresh);
+        if (agent === undefined) throw new Error(`Agent "${agentId}" could not be built.`);
+        const entry: TransactionAgentEntry<Database> = { agent, start };
+        provisional.set(agentId, entry);
+        afterCommit(ctx, () => {
+            outsideAgentDatabaseOperation(() => {
+                if (provisional.get(agentId) === entry) this.#publish(agent, entry.start);
+            });
+        });
         return agent;
     }
 
     /** Cancel an agent's active turn, leaving its queued messages durable for the next one. */
-    async abort(ctx: Context, agentId: string, options?: AgentBaseAwaitOptions): Promise<void> {
+    async abort(ctx: Context, agentId: string): Promise<void> {
         await this.#admit(async () => {
-            await (await this.#resolve(ctx, agentId)).abort(ctx, options);
+            await (await this.#resolve(ctx, agentId)).abort(ctx);
         });
     }
 
     /** Ask an agent for its conversation to be replaced by the provider's summary of it. */
-    async compact(ctx: Context, agentId: string, options?: AgentBaseAwaitOptions): Promise<void> {
+    async compact(ctx: Context, agentId: string): Promise<void> {
         await this.#admit(async () => {
-            await (await this.#resolve(ctx, agentId)).compact(ctx, options);
+            await (await this.#resolve(ctx, agentId)).compact(ctx);
         });
     }
 }

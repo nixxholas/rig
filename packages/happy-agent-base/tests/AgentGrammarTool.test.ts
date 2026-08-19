@@ -56,7 +56,7 @@ describe("grammar tools", () => {
             initialState: { tools: [grammarTool(received)] },
         });
 
-        await agent.send(ctx, user("edit the file"), { await: true });
+        await agent.send(ctx, user("edit the file"));
         await agent.waitForIdle();
         await agent.close();
 

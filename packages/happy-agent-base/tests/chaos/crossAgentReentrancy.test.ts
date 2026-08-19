@@ -360,7 +360,7 @@ describe("cross-agent tool re-entrancy", () => {
         const a = world.agent("A");
         const b = world.agent("B");
 
-        await a.send(ctx, user("start A"), { await: true });
+        await a.send(ctx, user("start A"));
         await Promise.all([a.waitForIdle(), b.waitForIdle()]);
         const observed = {
             executions,
@@ -398,7 +398,7 @@ describe("cross-agent tool re-entrancy", () => {
         const a = world.agent("A");
         const b = world.agent("B");
 
-        await a.send(ctx, user("start A"), { await: true });
+        await a.send(ctx, user("start A"));
         await Promise.all([a.waitForIdle(), b.waitForIdle()]);
         const observed = {
             bUsers: userTexts(world.persistence("B")),
@@ -420,7 +420,7 @@ describe("cross-agent tool re-entrancy", () => {
                 [
                     "A",
                     async (toolCtx, owner, _self, id) => {
-                        await owner.compact(toolCtx, id("B"), { await: true });
+                        await owner.compact(toolCtx, id("B"));
                     },
                 ],
             ]),
@@ -432,10 +432,10 @@ describe("cross-agent tool re-entrancy", () => {
         );
         const a = world.agent("A");
         const b = world.agent("B");
-        await b.send(ctx, user("seed B history"), { await: true });
+        await b.send(ctx, user("seed B history"));
         await b.waitForIdle();
 
-        await a.send(ctx, user("compact B"), { await: true });
+        await a.send(ctx, user("compact B"));
         await Promise.all([a.waitForIdle(), b.waitForIdle()]);
         const observed = {
             bRecordTypes: world.persistence("B").records.map((record) => record.type),
@@ -489,7 +489,7 @@ describe("cross-agent tool re-entrancy", () => {
         const a = world.agent("A");
         const b = world.agent("B");
 
-        await a.send(ctx, user("start cycle"), { await: true });
+        await a.send(ctx, user("start cycle"));
         const settled = await settlesWithin(Promise.all([a.waitForIdle(), b.waitForIdle()]), 500);
         const observed = {
             settled,
@@ -539,10 +539,7 @@ describe("cross-agent tool re-entrancy", () => {
         const a = world.agent("A");
         const b = world.agent("B");
 
-        await Promise.all([
-            a.send(ctx, user("start A"), { await: true }),
-            b.send(ctx, user("start B"), { await: true }),
-        ]);
+        await Promise.all([a.send(ctx, user("start A")), b.send(ctx, user("start B"))]);
         const settled = await settlesWithin(Promise.all([a.waitForIdle(), b.waitForIdle()]), 500);
         const observed = {
             settled,
@@ -574,7 +571,7 @@ describe("cross-agent tool re-entrancy", () => {
                 started += 1;
                 if (started === 2) bothToolsStarted.resolve();
                 await bothToolsStarted.promise;
-                await owner.compact(toolCtx, id(target), { await: true });
+                await owner.compact(toolCtx, id(target));
             };
         };
         const world = await harness(
@@ -594,15 +591,12 @@ describe("cross-agent tool re-entrancy", () => {
         const a = world.agent("A");
         const b = world.agent("B");
 
-        await Promise.all([
-            a.send(ctx, user("start A"), { await: true }),
-            b.send(ctx, user("start B"), { await: true }),
-        ]);
+        await Promise.all([a.send(ctx, user("start A")), b.send(ctx, user("start B"))]);
         await bothToolsStarted.promise;
         const settledWithoutIntervention = await settlesWithin(
             Promise.all([a.waitForIdle(), b.waitForIdle()]),
         );
-        await Promise.all([a.abort(ctx, { await: true }), b.abort(ctx, { await: true })]);
+        await Promise.all([a.abort(ctx), b.abort(ctx)]);
         await Promise.all([a.waitForIdle(), b.waitForIdle()]);
         const observed = {
             settledWithoutIntervention,
@@ -617,8 +611,8 @@ describe("cross-agent tool re-entrancy", () => {
             settledWithoutIntervention: true,
             aPending: [],
             bPending: [],
-            aToolResults: ["A-compacts-B"],
-            bToolResults: ["B-compacts-A"],
+            aToolResults: [],
+            bToolResults: [],
         });
     });
 
@@ -646,15 +640,12 @@ describe("cross-agent tool re-entrancy", () => {
         const a = world.agent("A");
         const b = world.agent("B");
 
-        await Promise.all([
-            a.send(ctx, user("start A"), { await: true }),
-            b.send(ctx, user("start B"), { await: true }),
-        ]);
+        await Promise.all([a.send(ctx, user("start A")), b.send(ctx, user("start B"))]);
         await bothToolsStarted.promise;
         const settledWithoutIntervention = await settlesWithin(
             Promise.all([a.waitForIdle(), b.waitForIdle()]),
         );
-        await Promise.all([a.abort(ctx, { await: true }), b.abort(ctx, { await: true })]);
+        await Promise.all([a.abort(ctx), b.abort(ctx)]);
         await Promise.all([a.close(), b.close()]);
         const observed = {
             settledWithoutIntervention,
@@ -697,15 +688,12 @@ describe("cross-agent tool re-entrancy", () => {
         const a = world.agent("A");
         const b = world.agent("B");
 
-        await Promise.all([
-            a.send(ctx, user("start A"), { await: true }),
-            b.send(ctx, user("start B"), { await: true }),
-        ]);
+        await Promise.all([a.send(ctx, user("start A")), b.send(ctx, user("start B"))]);
         await bothToolsStarted.promise;
         const settledWithoutIntervention = await settlesWithin(
             Promise.all([a.waitForIdle(), b.waitForIdle()]),
         );
-        await Promise.all([a.abort(ctx, { await: true }), b.abort(ctx, { await: true })]);
+        await Promise.all([a.abort(ctx), b.abort(ctx)]);
         await Promise.all([a.close(), b.close()]);
         const observed = {
             settledWithoutIntervention,
@@ -736,7 +724,7 @@ describe("cross-agent tool re-entrancy", () => {
                     "A",
                     async (toolCtx, owner, _self, id) => {
                         abortStarted.resolve();
-                        await owner.abort(toolCtx, id("B"), { await: true });
+                        await owner.abort(toolCtx, id("B"));
                     },
                 ],
             ]),
@@ -764,10 +752,10 @@ describe("cross-agent tool re-entrancy", () => {
         );
         const a = world.agent("A");
         const b = world.agent("B");
-        await b.send(ctx, user("block B"), { await: true });
+        await b.send(ctx, user("block B"));
         await bStarted.promise;
 
-        await a.send(ctx, user("abort B"), { await: true });
+        await a.send(ctx, user("abort B"));
         await abortStarted.promise;
         const aSettledWhileBBlocked = await settlesWithin(a.waitForIdle());
         releaseB.resolve();
@@ -825,10 +813,10 @@ describe("cross-agent tool re-entrancy", () => {
         );
         const a = world.agent("A");
         const b = world.agent("B");
-        await b.send(ctx, user("finish B before close"), { await: true });
+        await b.send(ctx, user("finish B before close"));
         await bStarted.promise;
 
-        await a.send(ctx, user("close B"), { await: true });
+        await a.send(ctx, user("close B"));
         await closeStarted.promise;
         const closedBeforeRelease = await settlesWithin(a.waitForIdle(), 40);
         releaseB.resolve();
@@ -889,10 +877,10 @@ describe("cross-agent tool re-entrancy", () => {
         );
         const a = world.agent("A");
         const b = world.agent("B");
-        await b.send(ctx, user("finish before deletion"), { await: true });
+        await b.send(ctx, user("finish before deletion"));
         await bStarted.promise;
 
-        await a.send(ctx, user("delete B"), { await: true });
+        await a.send(ctx, user("delete B"));
         await deleteStarted.promise;
         const deletedBeforeRelease = await settlesWithin(a.waitForIdle(), 40);
         releaseB.resolve();

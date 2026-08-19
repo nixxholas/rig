@@ -1096,7 +1096,7 @@ describe("permissions boundary contracts", () => {
                 role: "user",
                 content: [{ type: "text", text: permissionModeChangeNotice("read_only") }],
             },
-            { permissionMode: "read_only", await: true },
+            { permissionMode: "read_only" },
         );
         await accepted;
         await agent.waitForIdle();

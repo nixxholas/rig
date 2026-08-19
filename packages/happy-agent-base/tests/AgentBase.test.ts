@@ -80,7 +80,7 @@ describe("AgentBase", () => {
             initialState: { instructions: "Be brief." },
         });
 
-        await agent.send(ctx, user("hi"), { await: true });
+        await agent.send(ctx, user("hi"));
         await agent.waitForIdle();
 
         expect(events.filter((event) => event.type === "text_delta")).toHaveLength(11);
@@ -111,7 +111,7 @@ describe("AgentBase", () => {
             initialState: { instructions: "Original instructions." },
         });
 
-        await agent.send(ctx, user("first"), { await: true });
+        await agent.send(ctx, user("first"));
         await agent.waitForIdle();
 
         let executed = false;
@@ -128,7 +128,7 @@ describe("AgentBase", () => {
                 toLLM: () => [],
             }),
         );
-        await agent.send(ctx, user("second"), { await: true });
+        await agent.send(ctx, user("second"));
         await agent.waitForIdle();
 
         expect(provider.sessions[0]?.requests[0]?.context.instructions).toBe(
@@ -165,7 +165,7 @@ describe("AgentBase", () => {
             },
         });
 
-        await agent.send(ctx, user("first"), { await: true });
+        await agent.send(ctx, user("first"));
         await agent.waitForIdle();
 
         const session = provider.sessions[0];
@@ -214,7 +214,7 @@ describe("AgentBase", () => {
             },
         });
 
-        await agent.send(ctx, user("read it"), { await: true });
+        await agent.send(ctx, user("read it"));
         await agent.waitForIdle();
 
         expect(seen).toEqual(["a.txt"]);
@@ -283,7 +283,7 @@ describe("AgentBase", () => {
             },
         });
 
-        await agent.send(ctx, user("read it"), { await: true });
+        await agent.send(ctx, user("read it"));
         await agent.waitForIdle();
 
         expect(hooks).toBe(0);
@@ -341,7 +341,7 @@ describe("AgentBase", () => {
             },
         });
 
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await agent.waitForIdle();
 
         // The quick tool settles before the slow one: they ran in parallel.
@@ -401,7 +401,7 @@ describe("AgentBase", () => {
             },
         });
 
-        await agent.send(ctx, user("read it"), { await: true });
+        await agent.send(ctx, user("read it"));
         await agent.waitForIdle();
 
         expect(executed).toBe(false);
@@ -447,7 +447,7 @@ describe("AgentBase", () => {
             hooks: { onEvent: (_hookCtx, event) => events.push(event) },
         });
 
-        await agent.send(ctx, user("weather?"), { await: true });
+        await agent.send(ctx, user("weather?"));
         await agent.waitForIdle();
 
         // The server call stays in the assistant message; its provider-settled result is
@@ -484,7 +484,7 @@ describe("AgentBase", () => {
             hooks: { onEvent: (_hookCtx, event) => events.push(event) },
         });
 
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await agent.waitForIdle();
 
         expect(events).toEqual([
@@ -515,7 +515,7 @@ describe("AgentBase", () => {
             hooks: { onEvent: (_hookCtx, event) => events.push(event) },
         });
 
-        await agent.send(ctx, user("hi"), { await: true });
+        await agent.send(ctx, user("hi"));
         await agent.waitForIdle();
 
         expect(events).toEqual([
@@ -545,9 +545,9 @@ describe("AgentBase persistence", () => {
             persistence,
         });
 
-        await agent.send(ctx, user("hi"), { await: true });
+        await agent.send(ctx, user("hi"));
         await agent.waitForIdle();
-        await agent.send(ctx, user("more"), { await: true });
+        await agent.send(ctx, user("more"));
         await agent.waitForIdle();
 
         // A turn answers the durable conversation, not the one this instance remembers, so
@@ -601,7 +601,7 @@ describe("AgentBase persistence", () => {
             },
         });
 
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await agent.waitForIdle();
 
         expect(persistence.records).toEqual([
@@ -666,7 +666,7 @@ describe("AgentBase persistence", () => {
             },
         });
 
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await agent.waitForIdle();
 
         const kinds = persistence.records.map((record) =>
@@ -685,7 +685,7 @@ describe("AgentBase persistence", () => {
             provider: "scripted",
             persistence,
         });
-        await reloaded.send(ctx, user("back"), { await: true });
+        await reloaded.send(ctx, user("back"));
         await reloaded.waitForIdle();
 
         expect(reloadedProvider.sessions[0]?.requests[0]?.context.messages).toEqual([
@@ -721,7 +721,7 @@ describe("AgentBase persistence", () => {
             },
         });
 
-        await agent.send(ctx, user("hi"), { await: true });
+        await agent.send(ctx, user("hi"));
 
         // The message is durably stored the moment send resolves: still under its pending
         // key, or already consumed into the main store if the turn got that far.
@@ -764,10 +764,7 @@ describe("AgentBase persistence", () => {
             sendMode: "all",
         });
 
-        await Promise.all([
-            agent.send(ctx, user("first"), { await: true }),
-            agent.send(ctx, user("second"), { await: true }),
-        ]);
+        await Promise.all([agent.send(ctx, user("first")), agent.send(ctx, user("second"))]);
         await agent.waitForIdle();
 
         expect(
@@ -793,7 +790,7 @@ describe("AgentBase persistence", () => {
             persistence,
         });
 
-        await expect(agent.send(ctx, user("hi"), { await: true })).rejects.toThrow("disk full");
+        await expect(agent.send(ctx, user("hi"))).rejects.toThrow("disk full");
         await agent.waitForIdle();
 
         expect(persistence.records).toEqual([]);
@@ -815,7 +812,7 @@ describe("AgentBase persistence", () => {
             hooks: { onEvent: (_hookCtx, event) => events.push(event) },
         });
 
-        await agent.send(ctx, user("hi"), { await: true });
+        await agent.send(ctx, user("hi"));
         await agent.waitForIdle();
 
         expect(events).toEqual([
@@ -858,7 +855,7 @@ describe("AgentBase persistence", () => {
             hooks: { onEvent: (_hookCtx, event) => events.push(event) },
         });
 
-        await agent.send(ctx, user("hi"), { await: true });
+        await agent.send(ctx, user("hi"));
         await agent.waitForIdle();
 
         expect(events).toEqual([
@@ -926,7 +923,7 @@ describe("AgentBase persistence", () => {
             },
         });
 
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await agent.waitForIdle();
 
         expect(keysDuringFast).toHaveLength(2);
@@ -1127,9 +1124,9 @@ describe("AgentBase persistence", () => {
             },
         });
 
-        await agent.send(ctx, notice, { await: true });
+        await agent.send(ctx, notice);
         await agent.waitForIdle();
-        await agent.send(ctx, handoff, { await: true });
+        await agent.send(ctx, handoff);
         await agent.waitForIdle();
         await agent.close();
 
@@ -1198,7 +1195,7 @@ describe("AgentBase persistence", () => {
             persistence: new InMemoryPersistence(),
         });
 
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await agent.waitForIdle();
 
         await until(() => provider.streamClosed);
@@ -1251,11 +1248,12 @@ describe("AgentBase persistence", () => {
             hooks: { onEvent: (_hookCtx, event) => events.push(event) },
         });
 
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await until(() =>
             events.some((event) => event.type === "text_delta" && event.delta === "partial"),
         );
-        await agent.abort(ctx, { await: true });
+        await agent.abort(ctx);
+        await agent.waitForIdle();
 
         expect(events.at(-1)).toEqual({ type: "done", state: "cancelled" });
         // Once the stalled await settles, the requested stream closure runs its finally, and
@@ -1279,7 +1277,7 @@ describe("AgentBase persistence", () => {
             provider: "scripted",
             persistence,
         });
-        await reloaded.send(ctx, user("next"), { await: true });
+        await reloaded.send(ctx, user("next"));
         await reloaded.waitForIdle();
         expect(reloadedProvider.sessions[0]?.requests[0]?.context.messages).toEqual([
             user("go"),
@@ -1325,10 +1323,11 @@ describe("AgentBase persistence", () => {
             },
         });
 
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await until(() => started);
         expect(lifetime?.aborted).toBe(false);
-        await agent.abort(ctx, { await: true });
+        await agent.abort(ctx);
+        await agent.waitForIdle();
         // The running tool observed the cancellation through its context lifetime.
         expect(lifetime?.aborted).toBe(true);
 
@@ -1357,10 +1356,10 @@ describe("AgentBase persistence", () => {
             persistence: new InMemoryPersistence(),
         });
 
-        await agent.abort(ctx, { await: true });
-        await agent.send(ctx, user("hi"), { await: true });
+        await agent.abort(ctx);
+        await agent.send(ctx, user("hi"));
         await agent.waitForIdle();
-        await agent.abort(ctx, { await: true });
+        await agent.abort(ctx);
 
         expect(provider.sessions[0]?.requests).toHaveLength(1);
         await agent.close();
@@ -1400,13 +1399,12 @@ describe("AgentBase per-message settings", () => {
         });
 
         await agent.send(ctx, user("switch"), {
-            await: true,
             model: "anthropic/better",
             effort: "high",
             serviceTier: "priority",
         });
         await agent.waitForIdle();
-        await agent.send(ctx, user("plain"), { await: true });
+        await agent.send(ctx, user("plain"));
         await agent.waitForIdle();
 
         const session = provider.sessions[0];
@@ -1459,9 +1457,9 @@ describe("AgentBase per-message settings", () => {
             },
         });
 
-        await agent.send(ctx, user("hello"), { await: true });
+        await agent.send(ctx, user("hello"));
         await agent.waitForIdle();
-        await agent.send(ctx, user("switch"), { await: true, model: "openai/gpt" });
+        await agent.send(ctx, user("switch"), { model: "openai/gpt" });
         await agent.waitForIdle();
 
         expect(changes).toEqual([
@@ -1508,9 +1506,9 @@ describe("AgentBase per-message settings", () => {
             model: "anthropic/claude",
         });
 
-        await agent.send(ctx, user("hello"), { await: true });
+        await agent.send(ctx, user("hello"));
         await agent.waitForIdle();
-        await agent.send(ctx, user("switch"), { await: true, model: "openai/gpt" });
+        await agent.send(ctx, user("switch"), { model: "openai/gpt" });
         await agent.waitForIdle();
 
         expect(provider.sessions[1]?.requests[0]?.context.messages).toEqual([user("switch")]);
@@ -1536,9 +1534,9 @@ describe("AgentBase per-message settings", () => {
             },
         });
 
-        await agent.send(ctx, user("hello"), { await: true });
+        await agent.send(ctx, user("hello"));
         await agent.waitForIdle();
-        await agent.send(ctx, user("switch"), { await: true, model: "openai/gpt" });
+        await agent.send(ctx, user("switch"), { model: "openai/gpt" });
         await agent.waitForIdle();
 
         expect(provider.sessions[1]?.requests[0]?.context.messages).toEqual([
@@ -1567,9 +1565,9 @@ describe("AgentBase per-message settings", () => {
             },
         });
 
-        await agent.send(ctx, user("hello"), { await: true });
+        await agent.send(ctx, user("hello"));
         await agent.waitForIdle();
-        await agent.send(ctx, user("switch"), { await: true, model: "anthropic/claude-b" });
+        await agent.send(ctx, user("switch"), { model: "anthropic/claude-b" });
         await agent.waitForIdle();
 
         expect(changes).toEqual([
@@ -1612,10 +1610,9 @@ describe("AgentBase per-message settings", () => {
             persistence: new InMemoryPersistence(),
         });
 
-        await agent.send(ctx, user("hello"), { await: true });
+        await agent.send(ctx, user("hello"));
         await agent.waitForIdle();
         await agent.send(ctx, user("switch"), {
-            await: true,
             model: "anthropic/claude-sonnet",
         });
         await agent.waitForIdle();
@@ -1656,9 +1653,9 @@ describe("AgentBase per-message settings", () => {
             },
         });
 
-        await agent.send(ctx, user("hello"), { await: true });
+        await agent.send(ctx, user("hello"));
         await agent.waitForIdle();
-        await agent.send(ctx, user("switch"), { await: true, provider: "bedrock" });
+        await agent.send(ctx, user("switch"), { provider: "bedrock" });
         await agent.waitForIdle();
 
         // A claude-family model may move from a claude provider to a bedrock provider without
@@ -1697,9 +1694,9 @@ describe("AgentBase per-message settings", () => {
             persistence: new InMemoryPersistence(),
         });
 
-        await agent.send(ctx, user("hello"), { await: true });
+        await agent.send(ctx, user("hello"));
         await agent.waitForIdle();
-        await agent.send(ctx, user("switch"), { await: true, provider: "claude-b" });
+        await agent.send(ctx, user("switch"), { provider: "claude-b" });
         await agent.waitForIdle();
 
         // Same compatibility type but a different registry entry — for example another
@@ -1729,7 +1726,7 @@ describe("AgentBase per-message settings", () => {
             model: "anthropic/claude-x",
             persistence,
         });
-        await firstAgent.send(ctx, user("switch"), { await: true, provider: "bedrock" });
+        await firstAgent.send(ctx, user("switch"), { provider: "bedrock" });
         await firstAgent.waitForIdle();
         await firstAgent.close();
 
@@ -1742,7 +1739,7 @@ describe("AgentBase per-message settings", () => {
             model: "anthropic/claude-x",
             persistence,
         });
-        await secondAgent.send(ctx, user("plain"), { await: true });
+        await secondAgent.send(ctx, user("plain"));
         await secondAgent.waitForIdle();
 
         // The durable settings restored the provider switch; the constructor default did not
@@ -1762,7 +1759,7 @@ describe("AgentBase per-message settings", () => {
             persistence,
             model: "anthropic/default",
         });
-        await firstAgent.send(ctx, user("switch"), { await: true, model: "anthropic/better" });
+        await firstAgent.send(ctx, user("switch"), { model: "anthropic/better" });
         await firstAgent.waitForIdle();
         await firstAgent.close();
 
@@ -1774,7 +1771,7 @@ describe("AgentBase per-message settings", () => {
             persistence,
             model: "anthropic/default",
         });
-        await secondAgent.send(ctx, user("plain"), { await: true });
+        await secondAgent.send(ctx, user("plain"));
         await secondAgent.waitForIdle();
 
         // The previously effective model survived the restart through the durable settings.
@@ -1815,7 +1812,7 @@ describe("AgentBase message delivery strategies", () => {
         agent.start();
         await entered;
         // The send lands while the first turn sits inside its pre-turn hook.
-        await agent.send(ctx, user("hello"), { await: true });
+        await agent.send(ctx, user("hello"));
         releaseHook();
         await agent.waitForIdle();
 
@@ -1853,7 +1850,7 @@ describe("AgentBase message delivery strategies", () => {
         agent.start();
         await entered;
         // The send commits while the load is in flight and must remain visible afterwards.
-        const sent = agent.send(ctx, user("hello"), { await: true });
+        const sent = agent.send(ctx, user("hello"));
         releaseLoad();
         await sent;
         await agent.waitForIdle();
@@ -1873,7 +1870,7 @@ describe("AgentBase message delivery strategies", () => {
             persistence,
         });
 
-        await agent.steer(ctx, user("just steering"), { await: true });
+        await agent.steer(ctx, user("just steering"));
         await agent.waitForIdle();
 
         expect(provider.sessions[0]?.requests).toHaveLength(1);
@@ -1912,7 +1909,7 @@ describe("AgentBase message delivery strategies", () => {
             },
         });
 
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await agent.waitForIdle();
 
         const requests = provider.sessions[0]?.requests ?? [];
@@ -1948,7 +1945,7 @@ describe("AgentBase message delivery strategies", () => {
             },
         });
 
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await agent.waitForIdle();
 
         const requests = provider.sessions[0]?.requests ?? [];
@@ -1984,7 +1981,7 @@ describe("AgentBase message delivery strategies", () => {
             },
         });
 
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await agent.waitForIdle();
 
         const requests = provider.sessions[0]?.requests ?? [];
@@ -2016,7 +2013,7 @@ describe("AgentBase message delivery strategies", () => {
             },
         });
 
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await agent.waitForIdle();
 
         const requests = provider.sessions[0]?.requests ?? [];
@@ -2054,7 +2051,7 @@ describe("AgentBase message delivery strategies", () => {
             },
         });
 
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await agent.waitForIdle();
 
         const requests = provider.sessions[0]?.requests ?? [];
@@ -2104,7 +2101,7 @@ describe("AgentBase message delivery strategies", () => {
             },
         });
 
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await agent.waitForIdle();
 
         // The steering message rides into the same request as the tool result: injected after
@@ -2170,14 +2167,15 @@ describe("AgentBase compaction", () => {
             },
         });
 
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await until(() => started);
         const session = provider.sessions[0];
         if (session !== undefined) {
             session.compactionResults = [completed([compactionMessage, user("go")])];
         }
-        const compaction = agent.compact(ctx, { await: true });
+        const compaction = agent.compact(ctx);
         await compaction;
+        await agent.waitForIdle();
 
         // The compaction saw the complete finished turn, not the mid-turn state.
         expect(session?.compactions).toHaveLength(1);
@@ -2194,7 +2192,7 @@ describe("AgentBase compaction", () => {
             },
         ]);
 
-        await agent.send(ctx, user("after compaction"), { await: true });
+        await agent.send(ctx, user("after compaction"));
         await agent.waitForIdle();
         expect(session?.requests.at(-1)?.context.messages).toEqual([
             compactionMessage,
@@ -2231,7 +2229,7 @@ describe("AgentBase compaction", () => {
             },
         });
 
-        await agent.send(ctx, user("first"), { await: true });
+        await agent.send(ctx, user("first"));
         await agent.waitForIdle();
         const session = provider.sessions[0];
         if (session !== undefined) {
@@ -2239,7 +2237,7 @@ describe("AgentBase compaction", () => {
         }
         if (retained === undefined) throw new Error("The hook did not expose history KV.");
 
-        await agent.compact(ctx, { await: true });
+        await agent.compact(ctx);
         await agent.waitForIdle();
         expect([...persistence.values.keys()].filter((key) => key.includes(".history."))).toEqual(
             [],
@@ -2248,7 +2246,7 @@ describe("AgentBase compaction", () => {
             "the work its context belongs to has ended",
         );
 
-        await agent.send(ctx, user("after compaction"), { await: true });
+        await agent.send(ctx, user("after compaction"));
         await agent.waitForIdle();
 
         // The turn carrying out compaction still observes the old context. The first turn after
@@ -2280,8 +2278,9 @@ describe("AgentBase compaction", () => {
             };
         });
 
-        await agent.compact(ctx, { await: true });
+        await agent.compact(ctx);
         await primed;
+        await agent.waitForIdle();
 
         expect(provider.sessions[0]?.requests).toHaveLength(0);
         expect(provider.sessions[0]?.compactions[0]?.context.messages).toEqual([
@@ -2336,7 +2335,7 @@ describe("AgentBase compaction", () => {
             },
         });
 
-        await agent.compact(ctx, { await: true });
+        await agent.compact(ctx);
         await agent.waitForIdle();
 
         expect(order).toEqual(["before", "erased", "after"]);
@@ -2382,9 +2381,8 @@ describe("AgentBase compaction", () => {
             },
         });
 
-        await expect(agent.compact(ctx, { await: true })).rejects.toThrow(
-            "history observer failed",
-        );
+        await agent.compact(ctx);
+        await agent.waitForIdle();
 
         expect(persistence.records).toEqual(records);
         expect(persistence.values.get("kv.test-agent.history.marker")).toBe("keep");
@@ -2411,11 +2409,8 @@ describe("AgentBase compaction", () => {
             persistence,
         });
 
-        await Promise.all([
-            agent.compact(ctx, { await: true }),
-            agent.compact(ctx, { await: true }),
-            agent.compact(ctx, { await: true }),
-        ]);
+        await Promise.all([agent.compact(ctx), agent.compact(ctx), agent.compact(ctx)]);
+        await agent.waitForIdle();
 
         expect(provider.sessions[0]?.compactions).toHaveLength(1);
         expect(persistence.records.filter((record) => record.type === "compaction")).toHaveLength(
@@ -2424,7 +2419,7 @@ describe("AgentBase compaction", () => {
         await agent.close();
     });
 
-    it("rejects every waiter when the provider reports a failed compaction", async () => {
+    it("reports a failed requested compaction through the agent run", async () => {
         const persistence = new InMemoryPersistence([
             userRecord("hi"),
             { type: "block", block: { type: "text", text: "hello" } },
@@ -2454,10 +2449,9 @@ describe("AgentBase compaction", () => {
             },
         });
 
-        const first = agent.compact(ctx, { await: true });
-        const second = agent.compact(ctx, { await: true });
-        await expect(first).rejects.toThrow("model unavailable");
-        await expect(second).rejects.toThrow("model unavailable");
+        await agent.compact(ctx);
+        await agent.compact(ctx);
+        await agent.waitForIdle();
         expect(hooks).toEqual([
             expect.stringMatching(/^before:/u),
             expect.stringMatching(/^after:.*:failed$/u),
@@ -2467,7 +2461,7 @@ describe("AgentBase compaction", () => {
         expect(persistence.records.filter((record) => record.type === "compaction")).toHaveLength(
             0,
         );
-        await agent.send(ctx, user("still there?"), { await: true });
+        await agent.send(ctx, user("still there?"));
         await agent.waitForIdle();
         expect(provider.sessions[0]?.requests[0]?.context.messages).toEqual([
             user("hi"),
@@ -2503,7 +2497,8 @@ describe("AgentBase compaction", () => {
             persistence,
         });
 
-        await expect(agent.compact(ctx, { await: true })).rejects.toThrow("disk full");
+        await agent.compact(ctx);
+        await agent.waitForIdle();
 
         // The clear and the replacement write commit together or not at all.
         expect(persistence.records).toEqual(records);
@@ -2527,7 +2522,7 @@ describe("AgentBase compaction", () => {
             persistence,
         });
 
-        await agent.send(ctx, user("latest"), { await: true });
+        await agent.send(ctx, user("latest"));
         await agent.waitForIdle();
 
         expect(provider.sessions[0]?.requests[0]?.context.messages).toEqual([
@@ -2578,7 +2573,7 @@ describe("AgentBase instructions and tools hooks", () => {
             },
         });
 
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await agent.waitForIdle();
 
         // The hooks extend the state for the session, the request, and the tool execution
@@ -2612,7 +2607,7 @@ describe("AgentBase instructions and tools hooks", () => {
             },
         });
 
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await agent.waitForIdle();
 
         // Instructions are a correctness hook: no inference ran with a wrong prompt, and the
@@ -2640,7 +2635,7 @@ describe("AgentBase instructions and tools hooks", () => {
             hooks: { onEvent: (_hookCtx, event) => events.push(event) },
         });
 
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await agent.waitForIdle();
 
         expect(provider.sessions).toHaveLength(0);
@@ -2672,9 +2667,9 @@ describe("AgentBase instructions and tools hooks", () => {
             },
         });
 
-        await agent.send(ctx, user("one"), { await: true });
+        await agent.send(ctx, user("one"));
         await agent.waitForIdle();
-        await agent.send(ctx, user("two"), { await: true });
+        await agent.send(ctx, user("two"));
         await agent.waitForIdle();
 
         // The next inference saw the changed descriptors and got a fresh session carrying
@@ -2701,7 +2696,7 @@ describe("AgentBase instructions and tools hooks", () => {
             },
         });
 
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await agent.waitForIdle();
 
         expect(provider.sessions[0]?.options.instructions).toBe("async instructions");
@@ -2741,7 +2736,7 @@ describe("AgentBase instructions and tools hooks", () => {
             },
         });
 
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await agent.waitForIdle();
 
         expect(seenModel).toBe("tool-visible-model");
@@ -2780,7 +2775,7 @@ describe("AgentBase inference errors", () => {
             },
         });
 
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await agent.waitForIdle();
 
         // The failed response never answered the queued message, so it drained into a fresh
@@ -2810,7 +2805,7 @@ describe("AgentBase inference errors", () => {
             persistence,
         });
 
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await agent.waitForIdle();
 
         const failure = {
@@ -2820,7 +2815,7 @@ describe("AgentBase inference errors", () => {
         expect(persistence.records.at(-1)).toEqual({ type: "system", message: failure });
 
         // The next turn sees the surfaced failure in its context.
-        await agent.send(ctx, user("again"), { await: true });
+        await agent.send(ctx, user("again"));
         await agent.waitForIdle();
 
         expect(provider.sessions[0]?.requests[1]?.context.messages).toEqual([
@@ -2843,7 +2838,7 @@ describe("AgentBase inference errors", () => {
             persistence: new InMemoryPersistence(),
         });
 
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await agent.waitForIdle();
 
         expect(provider.sessions[0]?.requests).toHaveLength(1);
@@ -2882,7 +2877,7 @@ describe("AgentBase lifecycle hooks", () => {
             },
         });
 
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await agent.waitForIdle();
 
         expect(order).toEqual([
@@ -2922,7 +2917,7 @@ describe("AgentBase lifecycle hooks", () => {
             },
         });
 
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await agent.waitForIdle();
 
         expect(provider.sessions[0]?.requests[0]?.context.messages).toEqual([user("go"), notice]);
@@ -2980,7 +2975,7 @@ describe("AgentBase lifecycle hooks", () => {
             },
         });
 
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await agent.waitForIdle();
 
         const beforeLoop = persistence.writes.find(
@@ -3024,7 +3019,7 @@ describe("AgentBase lifecycle hooks", () => {
             },
         });
 
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await agent.waitForIdle();
 
         expect(persistence.values.has("context")).toBe(false);
@@ -3068,7 +3063,7 @@ describe("AgentBase lifecycle hooks", () => {
             },
         });
 
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await agent.waitForIdle();
 
         expect(raw.map((event) => event.type)).toEqual([
@@ -3156,7 +3151,7 @@ describe("AgentBase lifecycle hooks", () => {
             },
         });
 
-        await agent.send(ctx, user("look"), { await: true });
+        await agent.send(ctx, user("look"));
         await agent.waitForIdle();
 
         expect(order).toEqual(["dispatched:call-1", "tool", "answered:call-1"]);
@@ -3206,7 +3201,7 @@ describe("AgentBase lifecycle hooks", () => {
             },
         });
 
-        await agent.send(ctx, user("look"), { await: true });
+        await agent.send(ctx, user("look"));
         await agent.waitForIdle();
 
         expect(executions).toBe(0);
@@ -3239,7 +3234,7 @@ describe("AgentBase lifecycle hooks", () => {
             },
         });
 
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await agent.waitForIdle();
 
         expect(persistence.records.some((record) => record.type === "block")).toBe(false);
@@ -3290,10 +3285,11 @@ describe("AgentBase lifecycle hooks", () => {
             },
         });
 
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await until(() => events.some((event) => event.type === "text_end"));
-        await agent.abort(ctx, { await: true });
+        await agent.abort(ctx);
         releaseHang();
+        await agent.waitForIdle();
 
         // The response never reached a done event, so it measured no tokens — and the turn
         // reports plainly that it was cancelled rather than finished.
@@ -3332,7 +3328,7 @@ describe("AgentBase lifecycle hooks", () => {
             },
         });
 
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await agent.waitForIdle();
 
         // Each response reports what it measured; the turn carries the last measurement.
@@ -3375,7 +3371,7 @@ describe("AgentBase lifecycle hooks", () => {
             },
         });
 
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await agent.waitForIdle();
 
         expect(inferences).toMatchObject([
@@ -3414,7 +3410,7 @@ describe("AgentBase lifecycle hooks", () => {
             hooks,
         });
         // The first turn has nothing measured yet; its response then measures the context.
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await agent.waitForIdle();
         expect(starts).toEqual([undefined]);
         expect(persistence.values.get("context")).toEqual({ tokens: 540 });
@@ -3428,7 +3424,7 @@ describe("AgentBase lifecycle hooks", () => {
             persistence,
             hooks,
         });
-        await restarted.send(ctx, user("more"), { await: true });
+        await restarted.send(ctx, user("more"));
         await restarted.waitForIdle();
         expect(starts).toEqual([undefined, 540]);
         await restarted.close();
@@ -3454,7 +3450,7 @@ describe("AgentBase lifecycle hooks", () => {
             },
         });
 
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await agent.waitForIdle();
 
         const requests = provider.sessions[0]?.requests ?? [];
@@ -3484,7 +3480,7 @@ describe("AgentBase lifecycle hooks", () => {
             },
         });
 
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await agent.waitForIdle();
 
         expect(persistence.records).toContainEqual(
@@ -3528,7 +3524,7 @@ describe("AgentBase lifecycle hooks", () => {
             },
         });
 
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await until(() => closing !== undefined);
         if (closing === undefined) throw new Error("Close did not race the notice commit.");
         await closing;
@@ -3579,9 +3575,9 @@ describe("AgentBase lifecycle hooks", () => {
             },
         });
 
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await secondLoading;
-        const aborted = agent.abort(ctx, { await: true });
+        const aborted = agent.abort(ctx);
         releaseSecondLoad();
         await aborted;
         await agent.waitForIdle();
@@ -3641,9 +3637,9 @@ describe("AgentBase lifecycle hooks", () => {
             },
         });
 
-        const sending = agent.send(ctx, user("go"), { await: true });
+        const sending = agent.send(ctx, user("go"));
         await secondRequest;
-        const aborted = agent.abort(ctx, { await: true });
+        const aborted = agent.abort(ctx);
         releaseSecondRequest();
         await aborted;
         await sending;
@@ -3675,7 +3671,7 @@ describe("AgentBase lifecycle hooks", () => {
             },
         });
 
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await agent.waitForIdle();
 
         // Both actions were queued before the loop continued, so they drain into one inference.
@@ -3708,7 +3704,7 @@ describe("AgentBase lifecycle hooks", () => {
             },
         });
 
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await agent.waitForIdle();
 
         const requests = provider.sessions[0]?.requests ?? [];
@@ -3742,7 +3738,7 @@ describe("AgentBase lifecycle hooks", () => {
             },
         });
 
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await agent.waitForIdle();
 
         expect(provider.sessions[0]?.requests).toHaveLength(2);
@@ -3789,7 +3785,7 @@ describe("AgentBase lifecycle hooks", () => {
             },
         });
 
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await agent.waitForIdle();
 
         expect(provider.sessions[0]?.compactions).toHaveLength(1);
@@ -3841,7 +3837,7 @@ describe("AgentBase lifecycle hooks", () => {
             },
         });
 
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await agent.waitForIdle();
 
         expect(provider.sessions[0]?.requests[1]?.context.messages).toEqual([
@@ -3879,7 +3875,7 @@ describe("AgentBase load retry", () => {
             hooks: { onEvent: (_hookCtx, event) => events.push(event) },
         });
 
-        await agent.send(ctx, user("first try"), { await: true });
+        await agent.send(ctx, user("first try"));
         await agent.waitForIdle();
         expect(events).toEqual([
             {
@@ -3943,7 +3939,7 @@ describe("AgentBase scoped persistence", () => {
             },
         });
 
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await agent.waitForIdle();
 
         expect(callId).toMatch(/^[a-z0-9]+$/);
@@ -3970,7 +3966,7 @@ describe("AgentBase scoped persistence", () => {
             },
         });
 
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await agent.waitForIdle();
 
         expect(persistence.values.get("kv.test-agent.prepared")).toBe(true);
@@ -3996,9 +3992,9 @@ describe("AgentBase scoped persistence", () => {
             },
         });
 
-        await agent.send(ctx, user("hello"), { await: true });
+        await agent.send(ctx, user("hello"));
         await agent.waitForIdle();
-        await agent.send(ctx, user("switch"), { await: true, model: "openai/gpt" });
+        await agent.send(ctx, user("switch"), { model: "openai/gpt" });
         await agent.waitForIdle();
 
         // The hook runs inside the transaction committing the model change; the store executed

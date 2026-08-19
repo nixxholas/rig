@@ -149,7 +149,7 @@ describe("AgentBase black-box stream and request behavior", () => {
             },
         });
 
-        await agent.send(ctx, user("observe this"), { await: true });
+        await agent.send(ctx, user("observe this"));
         await agent.waitForIdle();
 
         expect(observed).toEqual(scriptedEvents);
@@ -182,7 +182,7 @@ describe("AgentBase black-box stream and request behavior", () => {
             serviceTier: "priority",
         });
 
-        await agent.send(ctx, user("question"), { await: true });
+        await agent.send(ctx, user("question"));
         await agent.waitForIdle();
 
         const session = provider.sessions[0];
@@ -236,7 +236,7 @@ describe("AgentBase black-box stream and request behavior", () => {
             hooks: { onEvent: (_hookCtx, event) => events.push(event) },
         });
 
-        await agent.send(ctx, user("stop"), { await: true });
+        await agent.send(ctx, user("stop"));
         await agent.waitForIdle();
 
         expect(events).toEqual([done, done]);
@@ -258,9 +258,9 @@ describe("AgentBase black-box stream and request behavior", () => {
             persistence,
         });
 
-        await agent.send(ctx, user("first"), { await: true });
+        await agent.send(ctx, user("first"));
         await agent.waitForIdle();
-        await agent.send(ctx, user("second"), { await: true });
+        await agent.send(ctx, user("second"));
         await agent.waitForIdle();
 
         expect(provider.sessions[0]?.requests).toHaveLength(2);
@@ -293,7 +293,7 @@ describe("AgentBase black-box stream and request behavior", () => {
             persistence,
         });
 
-        await agent.send(ctx, user("empty reply"), { await: true });
+        await agent.send(ctx, user("empty reply"));
         await agent.waitForIdle();
 
         expect(persistence.records).toEqual([
@@ -317,11 +317,11 @@ describe("AgentBase black-box stream and request behavior", () => {
             persistence: new InMemoryPersistence(),
         });
 
-        await agent.send(ctx, user("first"), { await: true });
+        await agent.send(ctx, user("first"));
         await agent.waitForIdle();
-        await agent.send(ctx, user("second"), { await: true });
+        await agent.send(ctx, user("second"));
         await agent.waitForIdle();
-        await agent.send(ctx, user("third"), { await: true });
+        await agent.send(ctx, user("third"));
         await agent.waitForIdle();
 
         expect(provider.sessions[0]?.requests.map((request) => request.context.messages)).toEqual([
@@ -364,7 +364,7 @@ describe("AgentBase black-box stream and request behavior", () => {
             },
         });
 
-        const sent = agent.send(ctx, user("persist now"), { await: true });
+        const sent = agent.send(ctx, user("persist now"));
         await sent;
 
         expect([...persistence.pending.values()]).toEqual([
@@ -412,7 +412,7 @@ describe("AgentBase black-box persistence and restart behavior", () => {
             persistence,
         });
 
-        await agent.send(ctx, user("question three"), { await: true });
+        await agent.send(ctx, user("question three"));
         await agent.waitForIdle();
 
         // The trailing seeded user message is unanswered, so recovery answers it first; the
@@ -453,7 +453,7 @@ describe("AgentBase black-box persistence and restart behavior", () => {
             sendMode: "all",
         });
 
-        await agent.send(ctx, user("new message"), { await: true });
+        await agent.send(ctx, user("new message"));
         await agent.waitForIdle();
 
         expect(provider.sessions[0]?.requests[0]?.context.messages).toEqual([
@@ -734,7 +734,7 @@ describe("AgentBase black-box persistence and restart behavior", () => {
             },
         });
 
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await agent.waitForIdle();
 
         // The failed response never dispatched the call, so nothing ran.
@@ -827,10 +827,10 @@ describe("AgentBase black-box persistence and restart behavior", () => {
             persistence,
         };
         const first = await AgentBase.create(ctx, options);
-        await first.send(ctx, user("first"), { await: true });
+        await first.send(ctx, user("first"));
         await loadEntered.promise;
         const second = await AgentBase.create(ctx, options);
-        await second.send(ctx, user("second"), { await: true });
+        await second.send(ctx, user("second"));
 
         const stored = [...persistence.pending.entries()]
             .filter(([key]) => key.startsWith("send."))
@@ -887,7 +887,7 @@ describe("AgentBase black-box persistence and restart behavior", () => {
             initialState: { tools: [makeDurableTool()] },
         });
 
-        await firstAgent.send(ctx, user("recover"), { await: true });
+        await firstAgent.send(ctx, user("recover"));
         await firstAgent.waitForIdle();
 
         expect(firstExecutions).toBe(1);
@@ -985,7 +985,7 @@ describe("AgentBase black-box tool validation and ordering", () => {
             initialState: { tools: [...tools] },
         });
         try {
-            await agent.send(ctx, user("invoke"), { await: true });
+            await agent.send(ctx, user("invoke"));
             await agent.waitForIdle();
 
             expect(provider.sessions[0]?.requests).toHaveLength(2);
@@ -1053,7 +1053,7 @@ describe("AgentBase black-box tool validation and ordering", () => {
             },
         });
 
-        await agent.send(ctx, user("empty"), { await: true });
+        await agent.send(ctx, user("empty"));
         await agent.waitForIdle();
 
         expect(received).toEqual({});
@@ -1089,7 +1089,7 @@ describe("AgentBase black-box tool validation and ordering", () => {
             initialState: { tools: [namespacedTool] },
         });
 
-        await agent.send(ctx, user("search"), { await: true });
+        await agent.send(ctx, user("search"));
         await agent.waitForIdle();
 
         expect(executed).toBe(1);
@@ -1152,7 +1152,7 @@ describe("AgentBase black-box tool validation and ordering", () => {
             initialState: { tools: [invalidResultTool, errorResultTool] },
         });
 
-        await agent.send(ctx, user("run both"), { await: true });
+        await agent.send(ctx, user("run both"));
         await agent.waitForIdle();
 
         expect(rendered).toBe(0);
@@ -1198,7 +1198,7 @@ describe("AgentBase black-box tool validation and ordering", () => {
             },
         });
 
-        await agent.send(ctx, user("run"), { await: true });
+        await agent.send(ctx, user("run"));
         await agent.waitForIdle();
 
         expect(provider.sessions[0]?.requests[1]?.context.messages.slice(-2)).toEqual([
@@ -1254,7 +1254,7 @@ describe("AgentBase black-box tool validation and ordering", () => {
             },
         });
 
-        await agent.send(ctx, user("server"), { await: true });
+        await agent.send(ctx, user("server"));
         await agent.waitForIdle();
 
         expect(executed).toBe(false);
@@ -1288,7 +1288,7 @@ describe("AgentBase black-box tool validation and ordering", () => {
             persistence,
         });
 
-        await agent.send(ctx, user("no calls"), { await: true });
+        await agent.send(ctx, user("no calls"));
         await agent.waitForIdle();
 
         expect(provider.sessions[0]?.requests).toHaveLength(1);
@@ -1338,7 +1338,7 @@ describe("AgentBase black-box tool validation and ordering", () => {
             initialState: { tools: [...tools] },
         });
 
-        await agent.send(ctx, user("parallel"), { await: true });
+        await agent.send(ctx, user("parallel"));
         await agent.waitForIdle();
 
         expect(keysAtFirstStart).toHaveLength(calls.length);
@@ -1379,7 +1379,7 @@ describe("AgentBase black-box lifecycle behavior", () => {
 
         await expect(agent.waitForIdle()).resolves.toBeUndefined();
         await agent.close();
-        await expect(agent.send(ctx, user("after close"), { await: true })).rejects.toThrow(
+        await expect(agent.send(ctx, user("after close"))).rejects.toThrow(
             "The agent has been closed.",
         );
         expect(() => agent.start()).toThrow("The agent has been closed.");
@@ -1396,7 +1396,7 @@ describe("AgentBase black-box lifecycle behavior", () => {
             persistence: new InMemoryPersistence(),
         });
 
-        await agent.send(ctx, user("close me"), { await: true });
+        await agent.send(ctx, user("close me"));
         await agent.waitForIdle();
         await agent.close();
         await agent.close();

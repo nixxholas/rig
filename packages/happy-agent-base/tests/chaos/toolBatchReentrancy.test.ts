@@ -76,14 +76,14 @@ describe("tool batch concurrency and re-entrancy", () => {
             initialState: { tools: [tool] },
         });
 
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await agent.waitForIdle();
         await agent.close();
 
         expect({ entered, observed }).toEqual({ entered: 2, observed: [1, 2] });
     });
 
-    it("refuses waiting for a compaction from inside the turn that would carry it out", async () => {
+    it("requests compaction from inside the turn without waiting for it", async () => {
         let failure: string | undefined;
         let agent!: AgentBase;
         const tool = defineAgentTool({
@@ -93,7 +93,7 @@ describe("tool batch concurrency and re-entrancy", () => {
             shouldReviewInAutoMode: () => false,
             execute: async (callCtx: Context) => {
                 try {
-                    await agent.compact(callCtx, { await: true });
+                    await agent.compact(callCtx);
                 } catch (error: unknown) {
                     failure = error instanceof Error ? error.message : String(error);
                 }
@@ -114,16 +114,14 @@ describe("tool batch concurrency and re-entrancy", () => {
             initialState: { tools: [tool] },
         });
 
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await agent.waitForIdle();
         await agent.close();
 
-        // The turn cannot end until the tool returns, and the compaction cannot run until the
-        // turn ends. The tool is told so rather than left waiting for ever.
-        expect(failure).toContain("would wait for a turn that cannot finish");
+        expect(failure).toBeUndefined();
     });
 
-    it("refuses waiting for a compaction from a hook the loop is waiting on", async () => {
+    it("requests compaction from a hook without waiting for it", async () => {
         let failure: string | undefined;
         let asked = false;
         let agent!: AgentBase;
@@ -137,7 +135,7 @@ describe("tool batch concurrency and re-entrancy", () => {
                     if (asked) return undefined;
                     asked = true;
                     try {
-                        await agent.compact(hookCtx, { await: true });
+                        await agent.compact(hookCtx);
                     } catch (error: unknown) {
                         failure = error instanceof Error ? error.message : String(error);
                     }
@@ -146,11 +144,11 @@ describe("tool batch concurrency and re-entrancy", () => {
             },
         });
 
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await agent.waitForIdle();
         await agent.close();
 
-        expect(failure).toContain("would wait for a turn that cannot finish");
+        expect(failure).toBeUndefined();
     });
 
     it("still lets a running tool abort the turn it belongs to", async () => {
@@ -183,14 +181,14 @@ describe("tool batch concurrency and re-entrancy", () => {
             initialState: { tools: [tool] },
         });
 
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await agent.waitForIdle();
         await agent.close();
 
         expect(events.at(-1)).toEqual({ type: "done", state: "cancelled" });
     });
 
-    it("refuses a waited message from inside the turn but still queues the asked-for one", async () => {
+    it("queues messages from inside the turn without waiting on itself", async () => {
         let failure: string | undefined;
         let agent!: AgentBase;
         const tool = defineAgentTool({
@@ -200,7 +198,7 @@ describe("tool batch concurrency and re-entrancy", () => {
             shouldReviewInAutoMode: () => false,
             execute: async (callCtx: Context) => {
                 try {
-                    await agent.send(callCtx, user("waited"), { await: true });
+                    await agent.send(callCtx, user("waited"));
                 } catch (error: unknown) {
                     failure = error instanceof Error ? error.message : String(error);
                 }
@@ -223,12 +221,12 @@ describe("tool batch concurrency and re-entrancy", () => {
             initialState: { tools: [tool] },
         });
 
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await agent.waitForIdle();
         const lastRequest = provider.sessions[0]?.requests.at(-1);
         await agent.close();
 
-        expect(failure).toContain("would wait for a turn that cannot finish");
+        expect(failure).toBeUndefined();
         expect(lastRequest?.context.messages.at(-1)).toEqual(user("asked for"));
     });
 });

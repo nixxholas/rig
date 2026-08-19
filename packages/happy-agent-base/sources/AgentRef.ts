@@ -2,23 +2,11 @@ import type { Context } from "@steve.kite/stdlib";
 
 import type { Agent } from "./Agent.js";
 import type { AgentBaseMessageOptions } from "./AgentBase.js";
-import { agentId } from "./AgentContexts.js";
 import type { AgentDatabase } from "./AgentDatabase.js";
 import type { AgentMetadata } from "./AgentMetadata.js";
 import type { AgentMessageAcceptance } from "./AgentMessageAcceptance.js";
 import type { AgentQueuedMessage } from "./AgentQueuedMessage.js";
 import type { AnyAgentTool } from "./AgentTool.js";
-
-/**
- * Whether this caller may be told that `agentId` durably accepted a message. Acceptance is a
- * queue write through that agent's database transaction, so waiting for it is safe from anywhere
- * except inside that agent's loop, which is holding the lock the write needs. A caller naming no
- * agent is an external host and may wait; only the target agent itself cannot.
- */
-export function acceptanceIsWaitable(ctx: Context, target: string): boolean {
-    const caller = agentId(ctx);
-    return caller !== target;
-}
 
 /**
  * A reference to an agent for code that runs inside one — a module hook, or a tool the run loop
@@ -57,10 +45,7 @@ export class AgentRef<Database extends AgentDatabase = AgentDatabase> {
         message: AgentQueuedMessage,
         options?: AgentBaseMessageOptions,
     ): Promise<AgentMessageAcceptance> {
-        return await this.#agent.steer(ctx, message, {
-            ...options,
-            await: acceptanceIsWaitable(ctx, this.#agent.id),
-        });
+        return await this.#agent.steer(ctx, message, options);
     }
 
     /** Queue a message that injects when the agent would otherwise stop. */
@@ -69,10 +54,7 @@ export class AgentRef<Database extends AgentDatabase = AgentDatabase> {
         message: AgentQueuedMessage,
         options?: AgentBaseMessageOptions,
     ): Promise<AgentMessageAcceptance> {
-        return await this.#agent.send(ctx, message, {
-            ...options,
-            await: acceptanceIsWaitable(ctx, this.#agent.id),
-        });
+        return await this.#agent.send(ctx, message, options);
     }
 
     /** Shallow-merge fields into this agent's immutable metadata. */
@@ -82,11 +64,11 @@ export class AgentRef<Database extends AgentDatabase = AgentDatabase> {
 
     /** Ask the agent to compact, which it does between turns. */
     async compact(ctx: Context): Promise<void> {
-        await this.#agent.compact(ctx, { await: false });
+        await this.#agent.compact(ctx);
     }
 
     /** Cancel the agent's active turn. */
     async abort(ctx: Context): Promise<void> {
-        await this.#agent.abort(ctx, { await: false });
+        await this.#agent.abort(ctx);
     }
 }

@@ -87,11 +87,10 @@ describe("AgentBase permission modes", () => {
             }),
         );
 
-        await agent.send(ctx, user("look around"), { await: true });
+        await agent.send(ctx, user("look around"));
         await agent.waitForIdle();
         await agent.steer(ctx, user("be careful now"), {
             permissionMode: "read_only",
-            await: true,
         });
         await agent.waitForIdle();
         await agent.close();
@@ -108,7 +107,7 @@ describe("AgentBase permission modes", () => {
         const persistence = new InMemoryPersistence();
         const first = new ScriptedProvider([textTurn("acknowledged")]);
         const agent = await AgentBase.create(ctx, options(first, persistence));
-        await agent.send(ctx, user("switch"), { permissionMode: "full_access", await: true });
+        await agent.send(ctx, user("switch"), { permissionMode: "full_access" });
         await agent.waitForIdle();
         await agent.close();
 
@@ -118,7 +117,7 @@ describe("AgentBase permission modes", () => {
             ctx,
             options(second, persistence, { initialState: { tools: [probeTool(seen)] } }),
         );
-        await resumed.send(ctx, user("carry on"), { await: true });
+        await resumed.send(ctx, user("carry on"));
         await resumed.waitForIdle();
         await resumed.close();
 
@@ -138,7 +137,7 @@ describe("AgentBase permission modes", () => {
             }),
         );
 
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await agent.waitForIdle();
         await agent.close();
 
@@ -173,9 +172,9 @@ describe("AgentBase permission modes", () => {
             }),
         );
 
-        await agent.send(ctx, user("sent"), { await: true });
+        await agent.send(ctx, user("sent"));
         await agent.waitForIdle();
-        await agent.steer(ctx, user("steered"), { await: true });
+        await agent.steer(ctx, user("steered"));
         await agent.waitForIdle();
         await agent.close();
 
@@ -204,7 +203,7 @@ describe("AgentBase permission modes", () => {
             }),
         );
 
-        await agent.send(ctx, user("unrecordable"), { permissionMode: "read_only", await: true });
+        await agent.send(ctx, user("unrecordable"), { permissionMode: "read_only" });
         await agent.waitForIdle();
         await agent.close();
 
@@ -241,7 +240,7 @@ describe("AgentBase permission modes", () => {
             }),
         );
 
-        await agent.send(ctx, user("go"), { await: true });
+        await agent.send(ctx, user("go"));
         await agent.waitForIdle();
         await agent.close();
 
