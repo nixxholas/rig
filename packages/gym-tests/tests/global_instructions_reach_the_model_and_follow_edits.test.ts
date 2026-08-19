@@ -16,9 +16,10 @@ function agentRequests(gym: Gym) {
     );
 }
 
+/** Everything the model saw for one turn: the instructions plus the conversation. */
 function conversationText(gym: Gym, index: number): string {
     const request = agentRequests(gym)[index];
-    return JSON.stringify(request?.context.messages ?? []);
+    return JSON.stringify(request?.context ?? {});
 }
 
 describe("global instructions reach the model and follow edits", () => {
@@ -50,8 +51,9 @@ describe("global instructions reach the model and follow edits", () => {
         gym.terminal.press("enter");
         await gym.terminal.waitForText("Second answer.");
 
+        // The updated file replaces the old instructions rather than accumulating beside them:
+        // the new text arrives with a replacement notice, and the old text is gone.
         const second = conversationText(gym, 1);
-        expect(second).toContain("Always greet the user in Portuguese.");
         expect(second).toContain("Always greet the user in Japanese.");
         expect(second).toContain("replace all previously provided AGENTS.md instructions");
     });

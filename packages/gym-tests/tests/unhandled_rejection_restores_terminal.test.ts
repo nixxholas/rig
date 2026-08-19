@@ -1,3 +1,4 @@
+import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
@@ -5,6 +6,11 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createGym, type Gym } from "@slopus/rig-gym";
 
 const repositoryRoot = join(dirname(fileURLToPath(import.meta.url)), "../../..");
+const tsxEntry = pathToFileURL(
+    createRequire(join(dirname(fileURLToPath(import.meta.url)), "../../../package.json")).resolve(
+        "tsx",
+    ),
+).href;
 const typeScriptHook = join(
     repositoryRoot,
     "packages/gym/sources/registerTypeScriptSourceHooks.mjs",
@@ -67,12 +73,18 @@ const timer = setInterval(() => {
     void Promise.reject(new Error("GYM_UNHANDLED_TUI_REJECTION"));
 }, 10);
 
-await runApp();
+await runApp(undefined, {
+    ...(process.env.RIG_MODEL === undefined ? {} : { modelId: process.env.RIG_MODEL }),
+    ...(process.env.RIG_PROVIDER === undefined ? {} : { providerId: process.env.RIG_PROVIDER }),
+    ...(process.env.RIG_PERMISSION_MODE === undefined
+        ? {}
+        : { permissionMode: process.env.RIG_PERMISSION_MODE }),
+});
 `;
 
 const shellHarnessSource = String.raw`
 before="$(stty -g)"
-node --import ${JSON.stringify(typeScriptHook)} rejecting-tui.mjs
+node --import ${JSON.stringify(tsxEntry)} --import ${JSON.stringify(typeScriptHook)} rejecting-tui.mjs
 status="$?"
 after="$(stty -g)"
 if [ "$after" = "$before" ]; then

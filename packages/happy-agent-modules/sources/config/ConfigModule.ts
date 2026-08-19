@@ -1,4 +1,4 @@
-import { open } from "node:fs/promises";
+import { chmod, mkdir, open, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
@@ -22,6 +22,7 @@ import {
     type AgentModelContext,
 } from "./impl/agentCatalog.js";
 import { readGlobalInstructions } from "./impl/readGlobalInstructions.js";
+import { HAPPY_TOML_TEMPLATE } from "./impl/userConfigurationTemplate.js";
 import { readSecurityDocument } from "./impl/readSecurityDocument.js";
 
 const MAX_PATH_LENGTH = 4_096;
@@ -1025,6 +1026,34 @@ export class ConfigModule implements AgentModule {
     }
 
     /**
+     * Creates the user's global configuration files when they do not exist yet: a fully
+     * commented happy.toml template plus empty AGENTS.md and SECURITY.md, all inside a private
+     * Config directory. Existing files are never touched. The daemon calls this once at
+     * startup; ephemeral commands such as installation inspection must not.
+     */
+    async ensureUserConfigurationFiles(): Promise<void> {
+        const paths = this.configuration.paths;
+        const directories = [
+            ...new Set([
+                dirname(paths.globalConfigPath),
+                dirname(paths.instructionsPath),
+                dirname(paths.securityPath),
+            ]),
+        ];
+        for (const directory of directories) {
+            // Keep the user-facing Happy parent normally accessible; only Config is private.
+            await mkdir(dirname(directory), { recursive: true });
+            await mkdir(directory, { mode: 0o700, recursive: true });
+            await chmod(directory, 0o700);
+        }
+        await Promise.all([
+            writeUserFileIfMissing(paths.globalConfigPath, HAPPY_TOML_TEMPLATE),
+            writeUserFileIfMissing(paths.instructionsPath, ""),
+            writeUserFileIfMissing(paths.securityPath, ""),
+        ]);
+    }
+
+    /**
      * The Gemini key, when this installation's environment carries one.
      *
      * Gemini is not one of the accounts a chat runs on: it answers over its own HTTP API, so it has
@@ -1196,6 +1225,25 @@ export class ConfigModule implements AgentModule {
             options.inference,
             Object.freeze({ ...options.environment }),
         );
+    }
+}
+
+/** Creates one user configuration file exclusively, leaving an existing file untouched. */
+async function writeUserFileIfMissing(path: string, contents: string): Promise<void> {
+    let file: Awaited<ReturnType<typeof open>>;
+    try {
+        file = await open(path, "wx", 0o600);
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "EEXIST") return;
+        throw error;
+    }
+    try {
+        await file.writeFile(contents, { encoding: "utf8" });
+        await file.close();
+    } catch (error) {
+        await file.close().catch(() => undefined);
+        await rm(path, { force: true }).catch(() => undefined);
+        throw error;
     }
 }
 

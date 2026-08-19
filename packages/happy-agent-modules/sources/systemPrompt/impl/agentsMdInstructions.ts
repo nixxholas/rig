@@ -6,6 +6,7 @@ import {
     type AgentModuleAction,
     type AgentModuleScope,
 } from "@slopus/happy-agent-base";
+import { createId } from "@paralleldrive/cuid2";
 import { Type, type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import { type Context } from "@steve.kite/stdlib";
@@ -60,10 +61,11 @@ const noticeMetadataSchema = Type.Object(
     {
         fingerprint: fingerprintSchema,
         kind: Type.Literal("agents-md"),
+        // A notice travels as a steering message, and the agent accepts only cuid2 message IDs.
         noticeId: Type.String({
-            minLength: 40,
-            maxLength: 40,
-            pattern: "^agentsmd[a-f0-9]{32}$",
+            minLength: 2,
+            maxLength: 32,
+            pattern: "^[a-z][a-z0-9]*$",
         }),
     },
     exact,
@@ -82,7 +84,6 @@ const FINGERPRINT_KEY = "last-delivered-fingerprint";
 const PENDING_NOTICE_KEY = "pending-notice";
 const TURN_SNAPSHOT_KEY = "turn-instructions-snapshot";
 const AGENTS_MD_METADATA_KEY = "agentsMd";
-const NOTICE_ID_PREFIX = "agentsmd";
 const REPLACEMENT_NOTICE =
     "These AGENTS.md instructions replace all previously provided AGENTS.md instructions.";
 const REMOVAL_NOTICE = "The previously provided AGENTS.md instructions no longer apply.";
@@ -594,7 +595,7 @@ function createFingerprint(text: string): string {
 }
 
 function createNoticeId(): string {
-    return `${NOTICE_ID_PREFIX}${globalThis.crypto.randomUUID().replaceAll("-", "")}`;
+    return createId();
 }
 
 function formatInstructions(snapshot: AgentsMdSnapshot | undefined): string {

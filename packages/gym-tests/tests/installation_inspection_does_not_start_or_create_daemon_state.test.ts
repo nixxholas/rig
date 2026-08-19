@@ -1,4 +1,6 @@
+import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -19,12 +21,15 @@ describe("installation inspection does not start or create daemon state", () => 
             "packages/gym/sources/registerTypeScriptSourceHooks.mjs",
         );
         const rigMain = join(repositoryRoot, "packages/rig/sources/main.ts");
+        const tsxEntry = pathToFileURL(
+            createRequire(join(repositoryRoot, "package.json")).resolve("tsx"),
+        ).href;
         const wrapper = `
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-const inspectionArguments = ${JSON.stringify(["--import", sourceHook, rigMain, "inspect", "--json"])};
+const inspectionArguments = ${JSON.stringify(["--import", tsxEntry, "--import", sourceHook, rigMain, "inspect", "--json"])};
 
 async function runInspection() {
     const child = spawn(process.execPath, inspectionArguments, {
