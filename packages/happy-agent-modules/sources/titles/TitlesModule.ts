@@ -1,24 +1,29 @@
-import {
-    type AgentKV,
-    type AgentModule,
-    type AgentModuleHooks,
-    type AnyAgentTool,
-} from "@slopus/happy-agent-base";
-import { createId } from "@paralleldrive/cuid2";
-import { Type } from "@sinclair/typebox";
-import { Value } from "@sinclair/typebox/value";
-import type { Context } from "@steve.kite/stdlib";
+import { AsyncResource } from "node:async_hooks";
 
 import {
+    withAgentDatabase,
+    type AgentKV,
+    type AgentBaseAcceptedMessage,
+    type AgentModule,
+    type AgentModuleHooks,
+    type AgentSystemRef,
+    type AnyAgentTool,
+} from "@slopus/happy-agent-base";
+import { Type } from "@sinclair/typebox";
+import { Value } from "@sinclair/typebox/value";
+import { afterCommit, detach, type Context, type RootContext } from "@steve.kite/stdlib";
+
+import {
+    MAX_NAMING_TRANSCRIPT_CHARS,
     titleNameRequestSchema,
     titleRefineRequestSchema,
-    titleSessionIdSchema,
     titleWorkspaceIdSchema,
     type TitleNameRequest,
     type TitleNames,
     type TitleRefineRequest,
 } from "./Title.js";
 import { ConfigModule } from "../config/index.js";
+import { HistoryModule } from "../history/index.js";
 import { WorkspacesModule, type Workspace } from "../workspaces/index.js";
 import {
     createNamingRequest,
@@ -32,81 +37,237 @@ import { selectNamingRoute } from "./impl/selectNamingRoute.js";
 /**
  * How long one name may take.
  *
- * A person is watching their own first message while this runs, and the agent's real work is
- * waiting behind it, so a name that has not arrived quickly is worth less than starting. Three
- * words from the cheapest model at no reasoning effort is seconds of work; ten of them is already
- * an account that is not going to answer.
+ * Naming is detached from the agent's work, but an abandoned provider request must still have a
+ * bound. Three words from the cheapest model at no reasoning effort is seconds of work; ten of
+ * them is already an account that is not going to answer.
  */
 const NAMING_TIMEOUT_MS = 10_000;
+const USER_MESSAGE_COUNT_KEY = "title-user-messages";
+const titleUserMessageCountSchema = Type.Union([Type.Literal(1), Type.Literal(2)]);
 
 /**
- * The names a first message settles: the chat's title, and the workspace and branch it works in.
+ * Titles generated from user-role messages, outside the agent's own inference path.
  *
- * One bounded inference on the cheapest model of the account the chat is already running on
- * answers both: the title a person reads in a list, and the lower-case slug the folder and the Git
- * branch both carry. Those two are one subject written two ways, so one reading of the message
- * settles them — and this runs in front of the agent's own work, where a second round trip is time
- * a person spends watching a placeholder. Nothing here runs inside the agent's loop or touches its
- * history: naming is a side question asked about the conversation, not a turn of it.
+ * The first accepted user message is the complete input to initial naming. The second accepted
+ * user message triggers one refinement from committed history, which already includes that new
+ * message. Message provenance is deliberately irrelevant: a user-role message follows the same
+ * path whether an API, a tool, or another in-process caller submitted it.
  *
- * A chat gets one second look, when its first piece of work is over and the conversation says what
- * the first message could only ask for. The workspace and the branch get none: a folder and a Git
- * ref are named once, because renaming either would move them out from under agents already
- * working there.
+ * The transactional hook advances a two-message counter and, for the second message, snapshots a
+ * bounded history excerpt before registering post-commit work. The model requests and metadata
+ * updates run through a detached context and a module-owned async resource, so no caller waits for
+ * them and no agent-turn async-local state leaks into them.
  *
- * The module remembers all three onces — which chats consumed their first-message naming, which
- * workspaces have taken a name, and which chats have had their second look — because the triggers
- * are events and events happen again.
+ * The module also exposes the lower-level helpers that can name an eligible workspace and branch
+ * from a message. Workspace names are independent from the automatic chat-title lifecycle.
  */
 export class TitlesModule implements AgentModule<AnyAgentTool> {
     readonly name = "titles";
 
+    readonly #backgroundScope = new AsyncResource("happy-agent-titles");
     readonly #config: ConfigModule;
-    readonly #initialClaims = new Set<string>();
+    readonly #history: HistoryModule;
+    readonly #titleTasks = new Map<string, Promise<void>>();
     readonly #workspaces: WorkspacesModule;
+    #agents: AgentSystemRef | undefined;
+    #closed = false;
+    #lifetime: RootContext | undefined;
     #store: AgentKV | undefined;
 
     /**
      * @param config The accounts a name may be written on, and the catalog it picks a cheap model
      * from.
+     * @param history The committed conversation read by the one title refinement.
      * @param workspaces The catalog a named workspace is renamed through.
      */
-    constructor(config: ConfigModule, workspaces: WorkspacesModule) {
+    constructor(config: ConfigModule, history: HistoryModule, workspaces: WorkspacesModule) {
         this.#config = config;
+        this.#history = history;
         this.#workspaces = workspaces;
     }
 
-    /**
-     * Takes hold of the store shared by every agent in the collection.
-     *
-     * What this module remembers belongs to the installation rather than to any one conversation:
-     * whether a workspace has taken a name is a question the next chat in it asks. The store only
-     * reaches a module through a lifecycle hook, and every agent — the root one included — is
-     * created or restored while the collection starts, so it is here before anything can ask.
-     */
-    readonly beforeStart = (): AgentModuleHooks<AnyAgentTool> => ({
-        agentCreatedTransact: (_ctx, scope) => {
-            this.#store = scope.sharedKV;
-        },
-        agentRestoredTransact: (_ctx, scope) => {
-            this.#store = scope.sharedKV;
-        },
-    });
+    /** Install title hooks and take hold of the shared store used by workspace naming helpers. */
+    readonly beforeStart = (
+        ctx: Context,
+        agents: AgentSystemRef,
+    ): AgentModuleHooks<AnyAgentTool> => {
+        this.#agents = agents;
+        this.#lifetime = withAgentDatabase(detach(ctx), ctx.db) as RootContext;
+        return {
+            agentCreatedTransact: (_hookCtx, scope) => {
+                this.#store = scope.sharedKV;
+            },
+            agentRestoredTransact: (_hookCtx, scope) => {
+                this.#store = scope.sharedKV;
+            },
+            messageAcceptedTransact: async (hookCtx, scope, accepted) => {
+                if (accepted.message.role !== "user") return;
+                const message = acceptedMessageText(accepted);
+                if (message.length === 0) return;
+                const stored = await scope.kv.read(hookCtx, USER_MESSAGE_COUNT_KEY);
+                const count = Value.Check(titleUserMessageCountSchema, stored) ? stored : 0;
+                if (count >= 2) return;
+                const next = count + 1;
+                await scope.kv.write(hookCtx, USER_MESSAGE_COUNT_KEY, next);
+                if (next === 1 && typeof scope.agent.metadata?.title === "string") return;
+                let transcript: string | undefined;
+                if (next === 2) {
+                    try {
+                        const excerpt = await this.#history.readExcerpt(
+                            hookCtx,
+                            scope.agent.id,
+                            MAX_NAMING_TRANSCRIPT_CHARS,
+                        );
+                        transcript =
+                            excerpt === undefined
+                                ? undefined
+                                : [excerpt.beginning, excerpt.recent]
+                                      .filter((part) => part.length > 0)
+                                      .join("\n\n");
+                    } catch (error) {
+                        hookCtx.log.debug(
+                            "History could not be read for title refinement.",
+                            { agentId: scope.agent.id },
+                            error,
+                        );
+                        return;
+                    }
+                    if (transcript === undefined || transcript.length === 0) return;
+                }
+                const committedTranscript = transcript;
+                afterCommit(hookCtx, () => {
+                    if (next === 1) {
+                        this.#startInitialTitle(scope.agent.id, scope.agent.provider, message);
+                    } else if (committedTranscript !== undefined) {
+                        this.#startTitleRefinement(
+                            scope.agent.id,
+                            scope.agent.provider,
+                            committedTranscript,
+                        );
+                    }
+                });
+            },
+        };
+    };
+
+    /** Stop accepting title work and drain the bounded requests already in flight. */
+    async close(): Promise<void> {
+        if (this.#closed) return;
+        this.#closed = true;
+        this.#lifetime = undefined;
+        await Promise.allSettled(this.#titleTasks.values());
+        this.#titleTasks.clear();
+        this.#backgroundScope.emitDestroy();
+        this.#agents = undefined;
+    }
+
+    /** Generate the initial title from the first accepted user-role message alone. */
+    async #nameFromFirstUserMessage(
+        ctx: Context,
+        agentId: string,
+        message: string,
+        providerId: string,
+    ): Promise<void> {
+        try {
+            const agents = this.#agents;
+            if (agents === undefined) return;
+            const config = await agents.config(ctx, agentId);
+            if (config === undefined || typeof config.metadata?.title === "string") return;
+            const names = await this.suggestNames(ctx, {
+                firstMessage: message,
+                providerId,
+                wanted: { title: true },
+            });
+            if (this.#closed || names.title === undefined) return;
+            const latest = await agents.config(ctx, agentId);
+            if (latest === undefined || typeof latest.metadata?.title === "string") return;
+            await agents.updateMetadata(ctx, agentId, { title: names.title });
+        } catch (error) {
+            ctx.log.debug(
+                "Naming an agent from its first user message did not happen.",
+                { agentId },
+                error,
+            );
+        }
+    }
+
+    /** Reconsider the title once, from committed history that includes the second user message. */
+    async #refineFromSecondUserMessage(
+        ctx: Context,
+        agentId: string,
+        providerId: string,
+        transcript: string,
+    ): Promise<void> {
+        try {
+            const agents = this.#agents;
+            if (agents === undefined) return;
+            const config = await agents.config(ctx, agentId);
+            if (config === undefined) return;
+            const currentTitle = config.metadata?.title;
+            const title = await this.refineChat(ctx, {
+                transcript,
+                providerId,
+                ...(typeof currentTitle === "string" ? { currentTitle } : {}),
+            });
+            if (this.#closed || title === undefined || title === currentTitle) return;
+            const latest = await agents.config(ctx, agentId);
+            if (latest === undefined || latest.metadata?.title !== currentTitle) return;
+            await agents.updateMetadata(ctx, agentId, { title });
+        } catch (error) {
+            ctx.log.debug(
+                "Refining an agent title from its second user message did not happen.",
+                { agentId },
+                error,
+            );
+        }
+    }
+
+    /** Start the initial detached title task, preserving any task already queued for this agent. */
+    #startInitialTitle(agentId: string, providerId: string, message: string): void {
+        this.#enqueueTitleTask(agentId, "initial-title", async (ctx) => {
+            await this.#nameFromFirstUserMessage(ctx, agentId, message, providerId);
+        });
+    }
+
+    /** Start the one detached refinement after any initial title task finishes. */
+    #startTitleRefinement(agentId: string, providerId: string, transcript: string): void {
+        this.#enqueueTitleTask(agentId, "title-refinement", async (ctx) => {
+            await this.#refineFromSecondUserMessage(ctx, agentId, providerId, transcript);
+        });
+    }
+
+    /** Serialize this agent's title requests without returning their promise to the agent loop. */
+    #enqueueTitleTask(agentId: string, name: string, work: (ctx: Context) => Promise<void>): void {
+        const lifetime = this.#lifetime;
+        if (this.#closed || lifetime === undefined) return;
+        const previous = this.#titleTasks.get(agentId);
+        let task!: Promise<void>;
+        task = (previous ?? Promise.resolve())
+            .then(
+                async () =>
+                    await this.#backgroundScope.runInAsyncScope(
+                        async () => await work(lifetime.named(name)),
+                    ),
+            )
+            .finally(() => {
+                if (this.#titleTasks.get(agentId) === task) this.#titleTasks.delete(agentId);
+            });
+        this.#titleTasks.set(agentId, task);
+    }
 
     /**
-     * Names a chat from the first thing a person said, and the workspace it works in with it.
+     * Names a chat from one message, and the workspace it works in with it.
      *
      * A chat is called nothing at all, and a workspace someone opened from a client is called
      * something like "Workspace 3", until there is anything to name them after; the first message
-     * is that. This runs in front of the agent's own work, so a person is not reading a placeholder
-     * while the answer arrives, and it is one request rather than two — the folder and the Git
-     * branch carry the same name, and the title is the same subject written as prose.
+     * is that. This runs independently of the agent's own work, and it is one request rather than
+     * two — the folder and the Git branch carry the same name, and the title is the same subject
+     * written as prose.
      *
      * The workspace name is settled here and forwarded to the catalog that owns folders and
-     * branches; the chat title is answered to the caller, because what a chat is called belongs to
-     * whoever keeps chats. A workspace takes a name once, from the first chat that manages it:
-     * renaming it later would move the folder out from under agents already working in it. A name a
-     * person chose is never replaced, and failing to think of one never fails the message.
+     * branches; the chat title is returned to the caller. A workspace takes a name once, from the
+     * first chat that manages it. A name a person chose is never replaced, and failing to think of
+     * one never fails the message.
      */
     async nameFromFirstMessage(
         ctx: Context,
@@ -153,9 +314,8 @@ export class TitlesModule implements AgentModule<AnyAgentTool> {
      * The names a first message suggests, in one request.
      *
      * Both names come out of one reading of the message because they are two ways of saying the
-     * same subject, and because a person is waiting on their own first message while this runs.
-     * Every name is optional by design: what could not be named keeps its placeholder, and the
-     * message is already on its way.
+     * same subject. Every name is optional by design: what could not be named keeps its
+     * placeholder, and the message and the agent's work are already on their way.
      */
     async suggestNames(
         ctx: Context,
@@ -210,62 +370,6 @@ export class TitlesModule implements AgentModule<AnyAgentTool> {
             ...(options.signal === undefined ? {} : { signal: options.signal }),
         });
         return parseSuggestedNames(answer, { title: true }).title;
-    }
-
-    /**
-     * Takes the one second look a chat gets, or says it has already been taken.
-     *
-     * A chat is looked at again once, when its first piece of work is over. The claim is durable
-     * because the trigger is not: a restart, a second turn and a resumed run would each otherwise
-     * pay for another naming, and a title that changes on every turn is a title nobody can find a
-     * chat by.
-     */
-    async claimChatRefinement(ctx: Context, sessionId: string): Promise<boolean> {
-        assertSessionId(sessionId);
-        // One statement decides it. Two triggers can reach this at the same moment — the person
-        // writing again while the turn that was about to end ends — and a read followed by a write
-        // would let both of them believe they won.
-        const attempt = createId();
-        const stored = await this.#refined().getOrCreate(ctx, sessionId, () => ({
-            at: Date.now(),
-            attempt,
-        }));
-        return Value.Check(refinementClaimSchema, stored) && stored.attempt === attempt;
-    }
-
-    /**
-     * Hands back a claim that produced nothing.
-     *
-     * An attempt that thought of no name spent nothing: the account was busy, the answer came back
-     * empty, the conversation was not worth reading yet. Keeping the claim would settle the chat's
-     * first title for good on the strength of a failure.
-     */
-    async releaseChatRefinement(ctx: Context, sessionId: string): Promise<void> {
-        assertSessionId(sessionId);
-        await this.#refined().delete(ctx, sessionId);
-    }
-
-    /**
-     * Takes the one first-message naming attempt a chat gets.
-     *
-     * This claim is never released. Once the real turn can start, moving its workspace folder or
-     * branch on a later message would move them out from under a running agent. One atomic store
-     * operation also makes concurrent sends agree which message was first.
-     */
-    async claimFirstMessageNaming(ctx: Context, sessionId: string): Promise<boolean> {
-        assertSessionId(sessionId);
-        if (this.#initialClaims.has(sessionId)) return false;
-        this.#initialClaims.add(sessionId);
-        try {
-            const attempt = createId();
-            const stored = await this.#initial().getOrCreate(ctx, sessionId, () => ({
-                at: Date.now(),
-                attempt,
-            }));
-            return Value.Check(refinementClaimSchema, stored) && stored.attempt === attempt;
-        } finally {
-            this.#initialClaims.delete(sessionId);
-        }
     }
 
     /** Whether a workspace has already taken the name of a chat. */
@@ -334,16 +438,6 @@ export class TitlesModule implements AgentModule<AnyAgentTool> {
         return this.#requireStore().scoped("named");
     }
 
-    /** The chats that have consumed their first-message naming, keyed by chat. */
-    #initial(): AgentKV {
-        return this.#requireStore().scoped("initial");
-    }
-
-    /** The chats whose second look has been claimed, keyed by chat. */
-    #refined(): AgentKV {
-        return this.#requireStore().scoped("refined");
-    }
-
     #requireStore(): AgentKV {
         if (this.#store === undefined) {
             throw new Error("The titles module has not been started by an agent collection.");
@@ -359,23 +453,16 @@ export interface TitlesFromFirstMessage {
     readonly workspace?: Workspace;
 }
 
-/** What a claimed second look stores: when it was claimed, and by which attempt. */
-const refinementClaimSchema = Type.Object(
-    {
-        at: Type.Integer({ minimum: 0 }),
-        attempt: Type.String({ minLength: 1, maxLength: 64 }),
-    },
-    { additionalProperties: false },
-);
+/** Plain text from one accepted message, omitting images and agent reasoning blocks. */
+function acceptedMessageText(accepted: AgentBaseAcceptedMessage): string {
+    return accepted.message.content
+        .flatMap((block) => (block.type === "text" ? [block.text] : []))
+        .join("\n")
+        .trim();
+}
 
 function assertWorkspaceId(workspaceId: string): void {
     if (!Value.Check(titleWorkspaceIdSchema, workspaceId)) {
         throw new Error("Workspace ID is invalid.");
-    }
-}
-
-function assertSessionId(sessionId: string): void {
-    if (!Value.Check(titleSessionIdSchema, sessionId)) {
-        throw new Error("Session ID is invalid.");
     }
 }

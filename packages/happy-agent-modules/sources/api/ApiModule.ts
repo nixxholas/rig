@@ -65,7 +65,6 @@ import {
     type TerminalEvent,
     type TerminalScope,
 } from "../terminals/index.js";
-import { TitlesModule } from "../titles/index.js";
 import { createNodeBinaryWebSocket, WebSocketDuplex } from "../transport/index.js";
 import {
     UsageModule,
@@ -165,7 +164,6 @@ export class ApiModule implements AgentModule {
     readonly #git: GitModule;
     readonly #history: HistoryModule;
     readonly #permissions: PermissionsModule;
-    readonly #titles: TitlesModule;
     readonly #userInput: UserInputModule;
     readonly #usage: UsageModule;
     readonly #profile: ProfileModule;
@@ -219,7 +217,6 @@ export class ApiModule implements AgentModule {
         git: GitModule,
         history: HistoryModule,
         permissions: PermissionsModule,
-        titles: TitlesModule,
         userInput: UserInputModule,
         usage: UsageModule,
         profile: ProfileModule,
@@ -237,7 +234,6 @@ export class ApiModule implements AgentModule {
         this.#git = git;
         this.#history = history;
         this.#permissions = permissions;
-        this.#titles = titles;
         this.#userInput = userInput;
         this.#usage = usage;
         this.#profile = profile;
@@ -1892,7 +1888,6 @@ export class ApiModule implements AgentModule {
                     : selected.serviceTiers?.find(
                           (candidate) => candidate === body.mode.serviceTier,
                       );
-            await this.#nameFromFirstMessage(ctx, agentId, body.text, body.mode.providerId);
             const content = [{ type: "text" as const, text: body.text }, ...(body.content ?? [])];
             const options: AgentBaseMessageOptions = {
                 id,
@@ -2149,49 +2144,6 @@ export class ApiModule implements AgentModule {
             current = parent;
         }
         throw new Error("The agent ancestry exceeds the supported depth.");
-    }
-
-    /** Names an untouched chat and its placeholder workspace before the real first turn starts. */
-    async #nameFromFirstMessage(
-        ctx: Context,
-        agentId: string,
-        firstMessage: string,
-        providerId: string,
-    ): Promise<void> {
-        try {
-            const [stats, pending] = await Promise.all([
-                this.#history.stats(ctx, agentId),
-                this.#history.pending(ctx, agentId),
-            ]);
-            if (stats.messages > 0 || pending.length > 0) return;
-            if (!(await this.#titles.claimFirstMessageNaming(ctx, agentId))) return;
-
-            const config = await this.#agentSystem().config(ctx, agentId);
-            if (config === undefined) return;
-            const workspaceId = await this.#workspaceIdForAgent(ctx, agentId);
-            const ownership =
-                workspaceId === undefined
-                    ? undefined
-                    : await this.#resolveWorkspaceScope(ctx, workspaceId);
-            const names = await this.#titles.nameFromFirstMessage(ctx, {
-                firstMessage,
-                providerId,
-                sessionNamed: typeof config.metadata?.title === "string",
-                ...(workspaceId === undefined || ownership === undefined
-                    ? {}
-                    : { workspace: { projectId: ownership.projectId, workspaceId } }),
-            });
-            if (names.title === undefined) return;
-            const latest = await this.#agentSystem().config(ctx, agentId);
-            if (latest === undefined || typeof latest.metadata?.title === "string") return;
-            await this.#updateAgentMetadata(ctx, agentId, { title: names.title });
-        } catch (error) {
-            ctx.log.debug(
-                "Naming a chat from its first message did not happen.",
-                { agentId },
-                error,
-            );
-        }
     }
 
     async #assertTopLevelAgent(

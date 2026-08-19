@@ -1,12 +1,26 @@
 # Titles — learnings
 
-## First-message naming is part of message admission
+## Titles follow accepted user-role messages, not transports
 
-Constructing the titles module is not enough: the public send boundary must ask it for the chat and
-workspace names before admitting the first real turn, then persist the returned chat title. The
-attempt is claimed durably per chat after proving history and the pending queue are empty, so
-concurrent sends cannot both rename a workspace and an old untitled conversation is not named from
-a later message.
+The message-accepted transactional hook counts text-bearing messages whose actual message role is
+`user`; provenance metadata is irrelevant, so API messages, tool-submitted messages, and other
+in-process callers follow one path. The first such message generates a title from that message
+alone. The second triggers one refinement from committed history, which already includes the new
+user message. Later user messages do not generate title requests.
+
+The hook writes the per-agent counter and snapshots a bounded history excerpt for the second
+message before registering post-commit work. Taking that snapshot in the acceptance transaction
+keeps a very fast response to the second message out of the refinement input. Inference and
+metadata updates then run on a detached module-owned context through an `AsyncResource` created
+outside every agent turn. Both boundaries are necessary: detaching the structured context prevents
+reuse of a committed database transaction, while the async resource prevents agent-loop
+async-local state from making the eventual metadata update look like a self-deadlocking in-turn
+mutation. Neither message acceptance nor real inference waits for naming, and the API module has no
+title behavior.
+
+Every task rechecks metadata before writing, so a title chosen while it runs always wins. Initial
+naming and refinement are serialized per agent, allowing a quickly arriving second user message to
+wait for the first title task without delaying the agent itself.
 
 ## Placeholder names must remain distinguishable from chosen names
 

@@ -40,9 +40,9 @@ const EXAMPLES: Readonly<Record<keyof TitleNamesWanted, string>> = {
  * reliably: plain text between tags. A schema would be enforced by the vendor for some providers and
  * simulated with a retry loop for others, and the loop was what left chats unnamed.
  *
- * Both names are asked for at once because a person is waiting on their own first message. The
- * title and the slug are two ways of saying the same subject, so one reading of the message answers
- * both, and asking twice would only buy a second round trip in front of the agent's own work.
+ * When a caller wants both names, they are asked for at once because the title and slug are two
+ * ways of saying the same subject. One reading of the message answers both without buying an
+ * unnecessary second request.
  */
 export function createNamingRequest(
     wanted: TitleNamesWanted,
@@ -51,7 +51,7 @@ export function createNamingRequest(
     const names = wantedNames(wanted);
     return {
         instructions: [
-            "You name a piece of work from the first thing a person said about it.",
+            "You name a piece of work from its first user message.",
             ...names.map((name) => WHAT_IT_IS[name]),
             "",
             names.length === 1
@@ -64,7 +64,7 @@ export function createNamingRequest(
             "",
             CLOSING,
         ].join("\n"),
-        prompt: ["The first thing the person said:", boundMessage(firstMessage)].join("\n"),
+        prompt: ["The first user message:", boundMessage(firstMessage)].join("\n"),
     };
 }
 

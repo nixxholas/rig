@@ -37,7 +37,7 @@ export const MAX_SLUG_CHARS = 48;
 
 export const titleNameRequestSchema = Type.Object(
     {
-        /** The first thing the person said, which is all the naming has to go on. */
+        /** The first accepted user-role message, which is all initial naming has to go on. */
         firstMessage: Type.String({ minLength: 1 }),
         wanted: titleNamesWantedSchema,
         /** The account the chat itself runs on, so naming uses its cheapest model. */
@@ -64,5 +64,3 @@ export const titleRefineRequestSchema = Type.Object(
 export type TitleRefineRequest = Static<typeof titleRefineRequestSchema>;
 
 export const titleWorkspaceIdSchema = Type.String({ minLength: 1, maxLength: 256 });
-
-export const titleSessionIdSchema = Type.String({ minLength: 1, maxLength: 256 });

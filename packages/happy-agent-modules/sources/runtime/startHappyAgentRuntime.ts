@@ -254,7 +254,7 @@ export async function startHappyAgentRuntime(
         const git = new GitModule(config);
         const projects = new ProjectsModule(config, git);
         const workspaces = new WorkspacesModule(config, projects, git);
-        const titles = new TitlesModule(config, workspaces);
+        const titles = new TitlesModule(config, history, workspaces);
         const terminals = new TerminalsModule(projects, workspaces);
         unwind.unshift(async () => await terminals.close());
         const files = new ProjectFilesModule(projects, workspaces, git);
@@ -313,7 +313,6 @@ export async function startHappyAgentRuntime(
             git,
             history,
             permissions,
-            titles,
             userInput,
             usage,
             profile,
@@ -418,6 +417,7 @@ export async function startHappyAgentRuntime(
             steeringMode: "all",
         });
         unwind.unshift(async () => await system.close(ctx));
+        unwind.unshift(async () => await titles.close());
         unwind.unshift(async () => await happy.stop());
 
         git.onSnapshot(async (snapshotCtx, entity, snapshot) => {

@@ -20,8 +20,8 @@ export interface NamingInferenceOptions {
  * of its own, streams one request, takes the text, and destroys the session, so nothing it says
  * ever reaches the history the person reads or the context the agent works from.
  *
- * The request is never retried. A person is waiting on their first message while this runs, and an
- * account that is signed out or spent will not answer differently the second time.
+ * The provider request is never retried. Naming is optional background work, and an account that
+ * is signed out or spent will not answer differently to an immediate replay.
  */
 export async function runNamingInference(
     ctx: Context,

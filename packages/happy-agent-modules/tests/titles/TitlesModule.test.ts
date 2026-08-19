@@ -1,19 +1,30 @@
-import type { AgentModel } from "@slopus/happy-agent-base";
+import {
+    AgentKV,
+    type AgentModel,
+    type AgentModuleScope,
+    type AgentSystemRef,
+} from "@slopus/happy-agent-base";
 import type { SessionEvent } from "@slopus/happy-providers";
 import { createRootContext } from "@steve.kite/stdlib";
-import { describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
 
 import { ConfigModule } from "../../sources/config/ConfigModule.js";
 import { GitModule } from "../../sources/git/index.js";
+import { HistoryModule } from "../../sources/history/index.js";
 import { ProjectsModule } from "../../sources/projects/index.js";
 import { TitlesModule } from "../../sources/titles/TitlesModule.js";
 import { WorkspacesModule } from "../../sources/workspaces/WorkspacesModule.js";
 import { temporaryTestConfig } from "../support/configModule.js";
 import { providersOf, sharedKV, textTurn } from "../support/fixtures.js";
+import { InMemoryPersistence } from "../support/InMemoryPersistence.js";
+import { moduleDatabase } from "../support/moduleDatabase.js";
 import { primaryAgents, resolveModuleHooks } from "../support/moduleHooks.js";
 import { ScriptedProvider } from "../support/ScriptedProvider.js";
 
 const ctx = createRootContext().named("happy-agent-modules-titles");
+const lifecycleDatabase = moduleDatabase([], "happy-agent-modules-titles-lifecycle");
+
+afterAll(() => lifecycleDatabase.close());
 
 /** A catalog served by the one scripted account, cheapest model last so preference is visible. */
 function models(
@@ -51,7 +62,7 @@ async function titles(script: SessionEvent[][], catalog: AgentModel[] = models()
     // real project and a real worktree exist, so the catalog here is simply the empty one this
     // configuration's own roots describe.
     const workspaces = new WorkspacesModule(config, new ProjectsModule(config, git), git);
-    const module = new TitlesModule(config, workspaces);
+    const module = new TitlesModule(config, new HistoryModule(), workspaces);
     return { module, provider };
 }
 
@@ -63,7 +74,7 @@ async function titles(script: SessionEvent[][], catalog: AgentModel[] = models()
  */
 async function started(): Promise<TitlesModule> {
     const { module } = await titles([]);
-    const hooks = await resolveModuleHooks(ctx, module, primaryAgents());
+    const hooks = await resolveModuleHooks(lifecycleDatabase.context, module, primaryAgents());
     await hooks.agentCreatedTransact?.(
         ctx,
         { agents: primaryAgents(), sharedKV: sharedKV() },
@@ -146,7 +157,7 @@ describe("TitlesModule naming", () => {
                 wanted: { slug: true, title: true },
             }),
         ).resolves.toEqual({ slug: "retry-policy-rewrite", title: "Retry policy rewrite" });
-        // A person is waiting on their own first message, so both names cost one round trip.
+        // Both names describe one subject, so a caller asking for both pays one round trip.
         expect(test.provider.sessions).toHaveLength(1);
     });
 
@@ -246,6 +257,64 @@ describe("TitlesModule naming", () => {
     });
 });
 
+describe("TitlesModule user-message lifecycle", () => {
+    it("uses an unstamped user message and ignores a system message before it", async () => {
+        const test = await titles([textTurn("<title>Retry policy rewrite</title>")]);
+        let metadata: Record<string, unknown> = {};
+        const agents = {
+            config: () => Promise.resolve({ metadata }),
+            updateMetadata: (_ctx: unknown, _agentId: string, update: Record<string, unknown>) => {
+                metadata = { ...metadata, ...update };
+                return Promise.resolve();
+            },
+        } as unknown as AgentSystemRef;
+        const hooks = await resolveModuleHooks(lifecycleDatabase.context, test.module, agents);
+        const persistence = new InMemoryPersistence();
+        const scope = {
+            agent: {
+                id: "unstamped-user-title",
+                metadata: undefined,
+                provider: "scripted",
+            },
+            historyKV: new AgentKV(persistence, "history."),
+            kv: new AgentKV(persistence, "agent."),
+            runKV: new AgentKV(persistence, "run."),
+            sharedKV: new AgentKV(persistence, "shared."),
+        } as AgentModuleScope;
+
+        await lifecycleDatabase.context.inTx(async (txCtx) => {
+            await hooks.messageAcceptedTransact?.(txCtx, scope, {
+                id: "system-message",
+                kind: "send",
+                message: {
+                    role: "system",
+                    content: [{ type: "text", text: "Internal wake-up" }],
+                },
+            });
+        });
+        await lifecycleDatabase.context.inTx(async (txCtx) => {
+            await hooks.messageAcceptedTransact?.(txCtx, scope, {
+                id: "user-message",
+                kind: "send",
+                message: {
+                    role: "user",
+                    content: [{ type: "text", text: "Rewrite the retry policy." }],
+                },
+            });
+        });
+        await vi.waitFor(() => expect(metadata["title"]).toBe("Retry policy rewrite"));
+        await test.module.close();
+
+        expect(test.provider.sessions).toHaveLength(1);
+        expect(JSON.stringify(test.provider.sessions[0]?.requests[0])).toContain(
+            "Rewrite the retry policy.",
+        );
+        expect(JSON.stringify(test.provider.sessions[0]?.requests[0])).not.toContain(
+            "Internal wake-up",
+        );
+    });
+});
+
 describe("TitlesModule naming from a first message", () => {
     it("names a chat that works in no workspace, and asks for no slug it cannot use", async () => {
         const test = await titles([textTurn("<title>Retry policy rewrite</title>")]);
@@ -329,35 +398,6 @@ describe("TitlesModule second look at a title", () => {
 
         await expect(test.module.refineChat(ctx, { transcript: "   " })).resolves.toBeUndefined();
         expect(test.provider.sessions).toHaveLength(0);
-    });
-});
-
-describe("TitlesModule second-look claim", () => {
-    it("gives a chat one second look, and hands the claim back when it produced nothing", async () => {
-        const module = await started();
-
-        await expect(module.claimChatRefinement(ctx, "s-1")).resolves.toBe(true);
-        await expect(module.claimChatRefinement(ctx, "s-1")).resolves.toBe(false);
-        await expect(module.claimChatRefinement(ctx, "s-2")).resolves.toBe(true);
-
-        await module.releaseChatRefinement(ctx, "s-1");
-
-        await expect(module.claimChatRefinement(ctx, "s-1")).resolves.toBe(true);
-        await expect(module.claimChatRefinement(ctx, "s-2")).resolves.toBe(false);
-    });
-});
-
-describe("TitlesModule first-message claim", () => {
-    it("gives exactly one concurrent caller the durable first naming attempt", async () => {
-        const module = await started();
-
-        const claims = await Promise.all(
-            Array.from({ length: 8 }, async () => await module.claimFirstMessageNaming(ctx, "s-1")),
-        );
-
-        expect(claims.filter(Boolean)).toHaveLength(1);
-        await expect(module.claimFirstMessageNaming(ctx, "s-1")).resolves.toBe(false);
-        await expect(module.claimFirstMessageNaming(ctx, "s-2")).resolves.toBe(true);
     });
 });
 
