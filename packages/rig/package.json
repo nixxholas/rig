@@ -75,7 +75,7 @@
         "@sinclair/typebox": "^0.34.49",
         "@slopus/ghostty-wasm": "1.3.6",
         "@slopus/ghostty-web": "0.1.3",
-        "@slopus/happy-agent-base": "0.0.23",
+        "@slopus/happy-agent-base": "0.0.24",
         "@slopus/happy-agent-client": "0.0.8",
         "@slopus/happy-agent-compute": "0.1.7",
         "@slopus/happy-providers": "0.0.11",
