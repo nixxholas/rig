@@ -214,7 +214,6 @@ export interface CodingAssistantAppOptions {
     initialWorkflows?: readonly WorkflowRun[];
     workflowsEnabled?: boolean;
     initialUserInputs?: readonly UserInputRequest[];
-    modelLocked?: boolean;
     listSecrets?: () => readonly SecretSummary[] | Promise<readonly SecretSummary[]>;
     /** Where the user is, and how to switch it. Absent when the daemon does not report presence. */
     presence?: {
@@ -488,7 +487,7 @@ export class CodingAssistantApp implements Component, Focusable {
     #showReasoning: boolean;
     #showUsage: boolean;
     #sessionBacked: boolean;
-    #modelLocked: boolean;
+    readonly #modelSelectionUnavailable: boolean;
     #mcpServers: readonly McpServerSummary[];
     #slashCommandSelectionIndex = 0;
     readonly #slashCommands: readonly SlashCommandItem[];
@@ -563,7 +562,7 @@ export class CodingAssistantApp implements Component, Focusable {
         this.#debugInfo = options.debugInfo;
         this.#showReasoning = options.showReasoning ?? false;
         this.#showUsage = options.showUsage ?? false;
-        this.#modelLocked = options.modelLocked ?? !options.agent.canChangeModel;
+        this.#modelSelectionUnavailable = !options.agent.canChangeModel;
         this.#mcpServers = options.initialMcpServers ?? [];
         this.#subagents = options.initialSubagents ?? [];
         this.#tasks = options.initialTasks ?? [];
@@ -850,7 +849,6 @@ export class CodingAssistantApp implements Component, Focusable {
                 });
                 return;
             }
-            this.#modelLocked = true;
             if (event.data.delivery === "run") {
                 this.#latestSessionRunId = event.data.runId;
             }
@@ -1149,9 +1147,6 @@ export class CodingAssistantApp implements Component, Focusable {
                 this.#interruptSettlementRunId = undefined;
             }
             this.#setRunning(false);
-            this.#modelLocked = this.#pendingPrompts.some(
-                (prompt) => prompt.shellCommand === undefined,
-            );
             this.#statusText =
                 event.data.stopReason === "stop" ? "Idle" : `Stopped: ${event.data.stopReason}`;
             this.#stopActivityAnimation();
@@ -1184,9 +1179,6 @@ export class CodingAssistantApp implements Component, Focusable {
                 this.#interruptSettlementRunId = undefined;
             }
             this.#setRunning(false);
-            this.#modelLocked = this.#pendingPrompts.some(
-                (prompt) => prompt.shellCommand === undefined,
-            );
             this.#statusText = "Error";
             this.#stopActivityAnimation();
             this.#markActiveToolCallsStopped();
@@ -1229,7 +1221,6 @@ export class CodingAssistantApp implements Component, Focusable {
             this.#setRunning(false);
             this.#clearEntries();
             this.#pendingSteeringMessages = [];
-            this.#modelLocked = false;
             this.#seenToolCallIds.clear();
             this.#streamEntryId = undefined;
             this.#thinkingEntryIdsByContentIndex.clear();
@@ -1283,7 +1274,6 @@ export class CodingAssistantApp implements Component, Focusable {
                 (entry) => entry.id === event.data.messageId,
             );
             if (targetIndex >= 0) this.#entries = this.#entries.slice(0, targetIndex);
-            this.#modelLocked = false;
             this.#statusText = "Idle";
             this.#streamEntryId = undefined;
             this.#thinkingEntryIdsByContentIndex.clear();
@@ -1914,7 +1904,6 @@ export class CodingAssistantApp implements Component, Focusable {
         this.#editor.addToHistory(prompt);
 
         this.#recordUserInput(this.#now());
-        this.#modelLocked = true;
         if (this.#running) {
             if (this.#sessionBacked && this.#activeSessionRunId === undefined) {
                 this.#pendingPrompts.push(submission);
@@ -2705,7 +2694,6 @@ export class CodingAssistantApp implements Component, Focusable {
             .then(() => {
                 if (!this.#sessionMutationBoundaryApplied) {
                     this.#clearEntries();
-                    this.#modelLocked = false;
                     this.#seenToolCallIds.clear();
                     this.#streamEntryId = undefined;
                     this.#thinkingEntryIdsByContentIndex.clear();
@@ -2867,7 +2855,10 @@ export class CodingAssistantApp implements Component, Focusable {
             } else {
                 this.#deferredTurnSeparator = false;
                 this.#statusText = "Error";
-                this.#appendEntry({ role: "error", text: errorToMessage(error) });
+                const text = errorToMessage(error);
+                if (!this.#hasActiveInferenceFailure(text)) {
+                    this.#appendEntry({ role: "error", text });
+                }
             }
         } finally {
             if (this.#isCurrentRun(runToken)) {
@@ -3211,7 +3202,6 @@ export class CodingAssistantApp implements Component, Focusable {
                 .join("\n"),
         );
         this.#syncAutocompleteState();
-        this.#modelLocked = false;
         this.#statusText = "Idle";
         this.#requestRender();
     }
@@ -4843,8 +4833,8 @@ export class CodingAssistantApp implements Component, Focusable {
         const panel = createSelectionPanel({
             theme: this.#theme,
             title: "Choose Model",
-            subtitle: this.#modelLocked
-                ? "Wait for the active response to finish"
+            subtitle: this.#modelSelectionUnavailable
+                ? "Model selection is unavailable in this session"
                 : "Enter selects, Esc cancels",
             selectedValue,
             items: choices.map((choice) => ({
@@ -4855,8 +4845,8 @@ export class CodingAssistantApp implements Component, Focusable {
                     choice.providerId,
                     choice.model.id === selectedModelId && choice.providerId === selectedProviderId,
                     {
-                        locked:
-                            this.#modelLocked &&
+                        unavailable:
+                            this.#modelSelectionUnavailable &&
                             (choice.model.id !== selectedModelId ||
                                 choice.providerId !== selectedProviderId),
                     },
@@ -4871,11 +4861,11 @@ export class CodingAssistantApp implements Component, Focusable {
                     this.#closeSelectionPanel();
                     return;
                 }
-                if (this.#modelLocked && item.value !== selectedValue) {
+                if (this.#modelSelectionUnavailable && item.value !== selectedValue) {
                     this.#appendEntry({
                         role: "event",
                         title: "Model",
-                        text: "Wait for the active response to finish before changing models.",
+                        text: "Model selection is unavailable in this session.",
                     });
                     this.#closeSelectionPanel();
                     this.#requestRender();
@@ -4917,9 +4907,9 @@ export class CodingAssistantApp implements Component, Focusable {
                 }),
             })),
             onSelect: (item) => {
-                if (this.#modelLocked || isCurrent) {
+                if (this.#modelSelectionUnavailable || isCurrent) {
                     this.#agent.setEffort(item.value);
-                    if (!this.#modelLocked) {
+                    if (!this.#modelSelectionUnavailable) {
                         this.#persistDefaultModel(
                             model.id,
                             item.value,
@@ -6197,7 +6187,7 @@ export class CodingAssistantApp implements Component, Focusable {
         const nextEffort = this.#nextReasoningEffort(direction);
         if (nextEffort !== undefined) {
             this.#agent.setEffort(nextEffort);
-            if (!this.#modelLocked) {
+            if (!this.#modelSelectionUnavailable) {
                 this.#persistDefaultModel(this.#agent.model.id, nextEffort);
             }
         }
@@ -6919,7 +6909,6 @@ export class CodingAssistantApp implements Component, Focusable {
         this.#shellMode = false;
         this.#editor.addToHistory(submission.displayText);
         this.#fileMentionAutocomplete?.clear();
-        if (submission.shellCommand === undefined) this.#modelLocked = true;
         this.#pendingPrompts.push(submission);
         this.#requestRender();
         return true;

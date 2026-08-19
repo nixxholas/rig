@@ -385,7 +385,9 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
         const runId = terminalRun?.id ?? activeRunId ?? submitted.message.id;
         const stopReason = aborted ? "aborted" : toStopReason(terminalRun);
         if (terminalRun?.status === "failed") {
-            throw new RemoteAgentRunError("The remote run failed.");
+            throw new RemoteAgentRunError(
+                failedRunMessage(this.#history, terminalRun.id) ?? "The remote run failed.",
+            );
         }
         return {
             contextMessages: snapshot.messages,
@@ -587,7 +589,9 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
         const message = this.applyEvent(event);
         const loopEvent = this.#projectLoopEvent(event);
         if (loopEvent !== undefined) await options.onEvent?.(loopEvent);
-        if (message?.role === "agent") await options.onMessage?.(message);
+        if (message?.role === "agent" || message?.role === "error") {
+            await options.onMessage?.(message);
+        }
     }
 
     #projectMessageEvent(event: HappyAgentEvent): ApiMessage | typeof MESSAGE_DELETED | undefined {
@@ -674,6 +678,14 @@ function toRigMessage(message: ApiMessage): Message {
             ),
             id: message.id,
             role: "agent",
+        };
+    }
+    if (message.role === "service") {
+        return {
+            blocks: message.content.flatMap(toRigContentBlock),
+            id: message.id,
+            outcome: "failed",
+            role: "error",
         };
     }
     return {
@@ -796,6 +808,20 @@ function toolResultText(block: ApiToolCallBlock): string {
 function belongsToAgent(event: HappyAgentEvent, agentId: string): boolean {
     const payload = event.payload as { agentId?: unknown; agent?: { id?: unknown } };
     return payload.agentId === agentId || payload.agent?.id === agentId;
+}
+
+function failedRunMessage(history: MessageHistoryResponse, runId: string): string | undefined {
+    const run = history.runs.find((candidate) => candidate.id === runId);
+    if (run === undefined) return undefined;
+    for (const message of run.messages.toReversed()) {
+        if (message.role !== "service") continue;
+        const text = message.content
+            .flatMap((block) => (block.type === "text" ? [block.text] : []))
+            .join("\n")
+            .trim();
+        if (text.length > 0) return text;
+    }
+    return undefined;
 }
 
 function toStopReason(run: Run | undefined): StopReason {

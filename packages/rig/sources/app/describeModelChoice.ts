@@ -6,12 +6,12 @@ export function describeModelChoice(
     model: Model,
     providerId: string,
     isCurrent: boolean,
-    options: { locked?: boolean } = {},
+    options: { unavailable?: boolean } = {},
 ): string {
     const providerName = humanizeProviderId(providerId);
     return [
-        options.locked === true
-            ? "Unavailable while running"
+        options.unavailable === true
+            ? "Unavailable in this session"
             : isCurrent
               ? "Current model"
               : `${providerName} model`,
