@@ -418,7 +418,10 @@ export { listTasksTool } from "./tasks/tools/list_tasks.js";
 export { updateTaskTool } from "./tasks/tools/update_task.js";
 export { completeTaskTool } from "./tasks/tools/complete_task.js";
 
-// Collaboration: durable agent rosters, directed messages, reply obligations, waits, and schedules.
+// Abort: one transactional cancellation across an agent and its complete descendant tree.
+export * from "./abort/index.js";
+
+// Collaboration: create agents, exchange asynchronous messages, and interrupt delegated work.
 export * from "./collaboration/index.js";
 
 // Workflows: host-managed durable workflow runs, scoped to the calling agent.

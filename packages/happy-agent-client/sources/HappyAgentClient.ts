@@ -864,7 +864,7 @@ export class HappyAgentClient {
         });
     }
 
-    /** `POST /v0/agents/:agentId/abort` — stops the current run. */
+    /** `POST /v0/agents/:agentId/abort` — immediately aborts this and every descendant run. */
     async abortAgent(
         agentId: Cuid2,
         request: AbortAgentRequest = {},

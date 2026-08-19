@@ -20,6 +20,7 @@ import { Value } from "@sinclair/typebox/value";
 import type { Context } from "@steve.kite/stdlib";
 import { WebSocketServer } from "ws";
 
+import { AbortModule } from "../abort/index.js";
 import { ComputeModule, type ComputeProcessEvent } from "../compute/index.js";
 import { ConfigModule } from "../config/index.js";
 import { EventsModule, eventIdSchema, type AgentEvent } from "../events/index.js";
@@ -131,6 +132,7 @@ interface AcceptedMessageBatch {
 export class ApiModule implements AgentModule {
     readonly name = "api";
 
+    readonly #abort: AbortModule;
     readonly #config: ConfigModule;
     readonly #events: EventsModule;
     readonly #projects: ProjectsModule;
@@ -181,6 +183,7 @@ export class ApiModule implements AgentModule {
     #preparePromise: Promise<void> | undefined;
 
     constructor(
+        abort: AbortModule,
         config: ConfigModule,
         events: EventsModule,
         projects: ProjectsModule,
@@ -196,6 +199,7 @@ export class ApiModule implements AgentModule {
         profile: ProfileModule,
         compute: ComputeModule,
     ) {
+        this.#abort = abort;
         this.#config = config;
         this.#events = events;
         this.#projects = projects;
@@ -1426,7 +1430,7 @@ export class ApiModule implements AgentModule {
                 const cursor = this.#journal.cursor();
                 await this.#withMutationId(
                     body.mutationId,
-                    async () => await this.#agentSystem().abort(ctx, agentId),
+                    async () => await this.#abort.abort(ctx, agentId),
                 );
                 sendJson(response, 202, {
                     agent: await this.#requireAgentResource(ctx, agentId),
@@ -1481,7 +1485,7 @@ export class ApiModule implements AgentModule {
                 if (shouldChange) {
                     await this.#withMutationId(body.mutationId, async () => {
                         if (operation === "archive") {
-                            await this.#agentSystem().abort(ctx, agentId);
+                            await this.#abort.abort(ctx, agentId);
                             await this.#compute.archiveAgent(ctx, agentId);
                         }
                         await this.#updateAgentMetadata(ctx, agentId, {

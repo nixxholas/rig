@@ -281,6 +281,118 @@ describe("public transcript and run APIs", () => {
         });
     }, 60_000);
 
+    it("aborts the targeted agent and its entire running descendant chain", async () => {
+        let parentAgentId = "";
+        let childAgentId: string | undefined;
+        let grandchildAgentId: string | undefined;
+        const callsByAgent = new Map<string, number>();
+        const gym = await startGym({
+            inference: (request) => {
+                if (request.sessionId.startsWith("naming:")) {
+                    return {
+                        content: [
+                            {
+                                text: "<title>Abort agent chain</title><slug>abort-agent-chain</slug>",
+                                type: "text",
+                            },
+                        ],
+                    };
+                }
+                const call = callsByAgent.get(request.sessionId) ?? 0;
+                callsByAgent.set(request.sessionId, call + 1);
+                if (request.sessionId === parentAgentId) {
+                    return call === 0
+                        ? {
+                              content: [
+                                  {
+                                      arguments: {
+                                          effort: "medium",
+                                          model: "gym/model",
+                                          text: "Create one descendant, then keep working.",
+                                          title: "Abort chain child",
+                                      },
+                                      callId: "abortchainchild",
+                                      name: "create_agent",
+                                      type: "tool_call",
+                                  },
+                              ],
+                          }
+                        : {
+                              content: [{ text: "parent still working", type: "text" }],
+                              delayMs: 8_000,
+                          };
+                }
+                if (childAgentId === undefined) {
+                    childAgentId = request.sessionId;
+                    return {
+                        content: [
+                            {
+                                arguments: {
+                                    effort: "medium",
+                                    model: "gym/model",
+                                    text: "Keep working until the chain is stopped.",
+                                    title: "Abort chain grandchild",
+                                },
+                                callId: "abortchaingrandchild",
+                                name: "create_agent",
+                                type: "tool_call",
+                            },
+                        ],
+                    };
+                }
+                if (request.sessionId === childAgentId) {
+                    return {
+                        content: [{ text: "child still working", type: "text" }],
+                        delayMs: 8_000,
+                    };
+                }
+                grandchildAgentId = request.sessionId;
+                return {
+                    content: [{ text: "grandchild still working", type: "text" }],
+                    delayMs: 8_000,
+                };
+            },
+        });
+        parentAgentId = gym.defaultSessionId;
+
+        const accepted = await gym.send("Create a running descendant chain.", {
+            permissionMode: "full_access",
+            wait: false,
+        });
+        const descendants = await gym.waitUntil(async () => {
+            const child = (await gym.client.getAgentActivity(parentAgentId)).subagents.find(
+                (agent) => agent.status === "working",
+            );
+            if (child === undefined) return undefined;
+            const grandchild = (await gym.client.getAgentActivity(child.id)).subagents.find(
+                (agent) => agent.status === "working",
+            );
+            if (grandchild === undefined) return undefined;
+            return { child, grandchild };
+        }, "the complete descendant chain to be working");
+        expect(childAgentId).toBe(descendants.child.id);
+        expect(grandchildAgentId).toBe(descendants.grandchild.id);
+
+        await gym.client.abortAgent(parentAgentId, {
+            expectedRunId: accepted.runId,
+            mutationId: "transcript-abort-chain",
+        });
+
+        const [finished, childRun, grandchildRun] = await Promise.all([
+            waitForAborted(gym, parentAgentId, accepted.runId),
+            waitForAbortedHistory(gym, descendants.child.id),
+            waitForAbortedHistory(gym, descendants.grandchild.id),
+        ]);
+        expect(finished.payload.run.status).toBe("aborted");
+        expect([childRun, grandchildRun]).toEqual([
+            expect.objectContaining({ reason: "abort", status: "aborted" }),
+            expect.objectContaining({ reason: "abort", status: "aborted" }),
+        ]);
+        await expect(gym.client.getAgent(parentAgentId)).resolves.toMatchObject({
+            agent: { status: "idle", subagents: { running: 0 } },
+        });
+    }, 60_000);
+
     it("recovers message deltas, deletes reset content, omits tool data, and keeps compaction out of runs", async () => {
         const gym = await startGym({
             inference: [
@@ -447,6 +559,35 @@ async function waitForFinished(
             finishedRunId(event) === runId,
         `run ${runId} to finish`,
     )) as Extract<GymAgentEvent, { type: "run.finished" | "run.boundary" }>;
+}
+
+async function waitForAborted(
+    gym: AgentGym,
+    agentId: string,
+    runId: string,
+): Promise<Extract<GymAgentEvent, { type: "run.finished" }>> {
+    return (await gym.waitForEvent(
+        (event) =>
+            event.type === "run.finished" &&
+            event.payload.agentId === agentId &&
+            event.payload.run.id === runId &&
+            event.payload.run.status === "aborted" &&
+            event.payload.run.reason === "abort",
+        `run ${runId} in agent ${agentId} to be aborted`,
+        10_000,
+    )) as Extract<GymAgentEvent, { type: "run.finished" }>;
+}
+
+async function waitForAbortedHistory(gym: AgentGym, agentId: string) {
+    return await gym.waitUntil(
+        async () => {
+            if ((await gym.client.getAgent(agentId)).agent.status !== "idle") return undefined;
+            const run = (await gym.client.getMessages(agentId)).runs.at(-1);
+            return run?.status === "aborted" && run.reason === "abort" ? run : undefined;
+        },
+        `the run in agent ${agentId} to be aborted`,
+        10_000,
+    );
 }
 
 async function waitForPendingMessageIds(

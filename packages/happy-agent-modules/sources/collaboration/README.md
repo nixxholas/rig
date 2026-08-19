@@ -3,11 +3,13 @@
 Lets one agent put another to work.
 
 ```ts
-new CollaborationModule();
+const abort = new AbortModule();
+new CollaborationModule(abort);
 ```
 
-There is nothing to configure and nothing to inject. The module reaches the rest of the runtime
-through the `AgentSystemRef` it is handed at `beforeStart`.
+There is nothing to configure. The module takes the abort module for transactional descendant-tree
+cancellation and reaches the rest of the runtime through the `AgentSystemRef` it is handed at
+`beforeStart`.
 
 ## How it works
 
@@ -142,9 +144,10 @@ own — so whatever shows a person their agents names it the same way it names e
 | -------------------- | --------------------------------------------------------------- |
 | `create_agent`       | Creates a collaborator and delivers its opening task.           |
 | `send_agent_message` | Delivers one message to a collaborator, or back to its creator. |
-| `interrupt_agent`    | Signals cancellation of a collaborator's current turn.          |
+| `interrupt_agent`    | Immediately aborts a collaborator and every running descendant. |
 
-`interrupt_agent` is reviewed in Auto mode; the other two are not.
+`interrupt_agent` is reviewed in Auto mode; the other two are not. It returns as soon as the abort
+signals are issued and never waits for any run to settle.
 
 ## Host operations
 

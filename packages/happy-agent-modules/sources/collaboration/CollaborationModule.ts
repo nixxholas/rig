@@ -15,6 +15,7 @@ import { type TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import type { Context } from "@steve.kite/stdlib";
 
+import { AbortModule } from "../abort/index.js";
 import { senderAgentIdMetadata } from "../impl/messageOrigin.js";
 import {
     collaborationAgentIdSchema,
@@ -55,7 +56,12 @@ export class CollaborationModule implements AgentModule {
     /** Only the retirement of the schema this module used to keep. See the file for why it stays. */
     readonly migrations = collaborationMigrations;
 
+    readonly #abort: AbortModule;
     #agents: AgentSystemRef | undefined;
+
+    constructor(abort: AbortModule) {
+        this.#abort = abort;
+    }
 
     /**
      * Create a collaborator and hand it its opening task. The call returns as soon as the work is
@@ -115,10 +121,7 @@ export class CollaborationModule implements AgentModule {
         await this.#deliver(ctx, actingAgentId, input.toAgentId, input.text, messageId, undefined);
     }
 
-    /**
-     * Stop a collaborator's current turn while keeping its identity and its queued follow-up work.
-     * Cancellation is signalled, not awaited: the collaborator stops when it notices.
-     */
+    /** Immediately abort a collaborator and every descendant without waiting for settlement. */
     async interruptAgent(
         ctx: Context,
         actingAgentId: string,
@@ -127,7 +130,7 @@ export class CollaborationModule implements AgentModule {
         this.#assert(collaborationAgentIdSchema, actingAgentId, "acting agent ID");
         this.#assert(collaborationAgentIdSchema, targetAgentId, "target agent ID");
         await this.#authorize(ctx, actingAgentId, targetAgentId, "interrupt");
-        await this.#requireAgents().abort(ctx, targetAgentId);
+        await this.#abort.abort(ctx, targetAgentId);
     }
 
     readonly #hooks: AgentModuleHooks = {

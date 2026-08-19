@@ -1,7 +1,6 @@
 import {
     createAgentGym,
     type AgentGym,
-    type GymAgentEvent,
     type GymInferenceRequest,
     type GymTurn,
 } from "@slopus/happy-agent-gym";
@@ -355,6 +354,125 @@ describe("public questions and activity API", () => {
         });
     }, 30_000);
 
+    it("lets interrupt_agent immediately abort every running descendant", async () => {
+        let parentAgentId = "";
+        let childAgentId: string | undefined;
+        let grandchildAgentId: string | undefined;
+        let markGrandchildStarted!: () => void;
+        const grandchildStarted = new Promise<void>((resolve) => {
+            markGrandchildStarted = resolve;
+        });
+        const callsByAgent = new Map<string, number>();
+        const gym = await createAgentGym({
+            inference: async (request: GymInferenceRequest): Promise<GymTurn> => {
+                if (request.sessionId.startsWith("naming:")) {
+                    return {
+                        content: [
+                            {
+                                text: "<title>Interrupt agent chain</title><slug>interrupt-agent-chain</slug>",
+                                type: "text",
+                            },
+                        ],
+                    };
+                }
+                const call = callsByAgent.get(request.sessionId) ?? 0;
+                callsByAgent.set(request.sessionId, call + 1);
+                if (request.sessionId === parentAgentId) {
+                    if (call === 0) {
+                        return {
+                            content: [
+                                {
+                                    arguments: {
+                                        effort: "medium",
+                                        model: "gym/model",
+                                        text: "Create a descendant and keep working.",
+                                        title: "Interrupt chain child",
+                                    },
+                                    callId: "interruptchainchild",
+                                    name: "create_agent",
+                                    type: "tool_call",
+                                },
+                            ],
+                        };
+                    }
+                    if (call === 1) {
+                        await grandchildStarted;
+                        if (childAgentId === undefined) {
+                            throw new Error("The child agent was not created.");
+                        }
+                        return {
+                            content: [
+                                {
+                                    arguments: { targetAgentId: childAgentId },
+                                    callId: "interruptchain",
+                                    name: "interrupt_agent",
+                                    type: "tool_call",
+                                },
+                            ],
+                        };
+                    }
+                    return {
+                        content: [{ text: "The collaborator chain was stopped.", type: "text" }],
+                    };
+                }
+                if (childAgentId === undefined) {
+                    childAgentId = request.sessionId;
+                    return {
+                        content: [
+                            {
+                                arguments: {
+                                    effort: "medium",
+                                    model: "gym/model",
+                                    text: "Keep working until interrupted.",
+                                    title: "Interrupt chain grandchild",
+                                },
+                                callId: "interruptchaingrandchild",
+                                name: "create_agent",
+                                type: "tool_call",
+                            },
+                        ],
+                    };
+                }
+                if (request.sessionId === childAgentId) {
+                    return {
+                        content: [{ text: "child still working", type: "text" }],
+                        delayMs: 8_000,
+                    };
+                }
+                grandchildAgentId = request.sessionId;
+                markGrandchildStarted();
+                return {
+                    content: [{ text: "grandchild still working", type: "text" }],
+                    delayMs: 8_000,
+                };
+            },
+        });
+        running.add(gym);
+        parentAgentId = gym.defaultSessionId;
+
+        await gym.send("Create a collaborator chain, then interrupt the direct collaborator.", {
+            permissionMode: "full_access",
+        });
+        if (childAgentId === undefined || grandchildAgentId === undefined) {
+            throw new Error("The collaborator chain was not created.");
+        }
+        const [childRun, grandchildRun] = await Promise.all([
+            waitForAbortedHistory(gym, childAgentId),
+            waitForAbortedHistory(gym, grandchildAgentId),
+        ]);
+
+        expect(
+            gym.inference.toolResults().some((result) => result.callId === "interruptchain"),
+        ).toBe(true);
+        expect([childRun, grandchildRun]).toEqual([
+            expect.objectContaining({ reason: "abort", status: "aborted" }),
+            expect.objectContaining({ reason: "abort", status: "aborted" }),
+        ]);
+        await expect(gym.client.getAgentActivity(parentAgentId)).resolves.toMatchObject({
+            subagents: [expect.objectContaining({ id: childAgentId, status: "idle" })],
+        });
+    }, 60_000);
+
     it("tracks background processes through activity, archive, stop, replay, and shutdown", async () => {
         const gym = await createAgentGym({
             inference: [
@@ -460,4 +578,16 @@ function apiError(error: unknown): {
         code: typeof candidate.code === "string" ? candidate.code : null,
         status: candidate.status,
     };
+}
+
+async function waitForAbortedHistory(gym: AgentGym, agentId: string) {
+    return await gym.waitUntil(
+        async () => {
+            if ((await gym.client.getAgent(agentId)).agent.status !== "idle") return undefined;
+            const run = (await gym.client.getMessages(agentId)).runs.at(-1);
+            return run?.status === "aborted" && run.reason === "abort" ? run : undefined;
+        },
+        `the run in agent ${agentId} to be aborted`,
+        10_000,
+    );
 }

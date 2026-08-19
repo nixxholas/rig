@@ -13,6 +13,7 @@ import type { Compute, HostComputeConfig } from "@slopus/happy-agent-compute";
 import { createRootContext, detach, type Context, type RootContext } from "@steve.kite/stdlib";
 import type { LibSQLDatabase } from "drizzle-orm/libsql";
 
+import { AbortModule } from "../abort/index.js";
 import { ApiModule } from "../api/index.js";
 import { AutoModule } from "../auto/index.js";
 import { CollaborationModule } from "../collaboration/index.js";
@@ -83,6 +84,7 @@ export interface PreparedHappyAgentRuntime {
 
 /** Every capability in the runtime, addressable by its owning module. */
 export interface HappyAgentRuntimeModules {
+    readonly abort: AbortModule;
     readonly api: ApiModule;
     readonly auto: AutoModule;
     readonly collaboration: CollaborationModule;
@@ -256,7 +258,8 @@ export async function startHappyAgentRuntime(
 
         const profile = new ProfileModule<LibSQLDatabase>();
         const murmur = new MurmurModule<LibSQLDatabase>(config, profile);
-        const collaboration = new CollaborationModule();
+        const abort = new AbortModule();
+        const collaboration = new CollaborationModule(abort);
         const scheduling = new SchedulingModule();
         const userInput = new UserInputModule(presence);
         userInput.onEventTransactional(async (listenerCtx, event) => {
@@ -291,6 +294,7 @@ export async function startHappyAgentRuntime(
         const usage = new UsageModule(events);
         const workflows = new WorkflowsModule(config, collaboration, compute.computeModule);
         const api = new ApiModule(
+            abort,
             config,
             events,
             projects,
@@ -309,6 +313,7 @@ export async function startHappyAgentRuntime(
         unwind.unshift(async () => await api.close());
 
         const modules: HappyAgentRuntimeModules = {
+            abort,
             api,
             auto,
             collaboration,
@@ -346,6 +351,7 @@ export async function startHappyAgentRuntime(
         const ordered: AgentModule<AnyAgentTool, LibSQLDatabase>[] = [
             // API must subscribe before any later module restores state or emits an event.
             api,
+            abort,
             config,
             observation,
             systemPrompt,

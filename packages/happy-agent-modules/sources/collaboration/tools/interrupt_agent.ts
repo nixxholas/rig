@@ -12,25 +12,25 @@ const interruptAgentInputSchema = Type.Object(
 );
 type InterruptAgentInput = Static<typeof interruptAgentInputSchema>;
 
-/** Stop a collaborator's current turn while keeping it available for follow-up work. */
+/** Immediately abort a collaborator and every descendant without waiting for settlement. */
 export function interruptAgentTool(collaboration: CollaborationModule, actingAgentId: string) {
     return defineAgentTool({
         name: "interrupt_agent",
         description:
-            "Interrupt a collaborator's current turn. The collaborator remains available and can receive follow-up work later.",
+            "Immediately abort a collaborator's current turn and every running descendant. Nothing waits for them to settle, and the agents remain available for follow-up work later.",
         parameters: interruptAgentInputSchema,
         returnType: Type.Void(),
         durable: false,
         shouldReviewInAutoMode: () => true,
         describeAutoPermissionAction: ({ targetAgentId }) =>
-            `interrupting collaborator "${targetAgentId}" and stopping its current turn; the collaborator remains available for follow-up work`,
+            `immediately aborting collaborator "${targetAgentId}" and every running descendant without waiting for settlement; the agents remain available for follow-up work`,
         execute: async (ctx, input: InterruptAgentInput) => {
             await collaboration.interruptAgent(ctx, actingAgentId, input.targetAgentId);
         },
         toLLM: () => [
             {
                 type: "text",
-                text: "Asked the collaborator to stop its current turn. It stops when it notices, and remains available for follow-up work.",
+                text: "Aborted the collaborator and every running descendant immediately. Nothing waits for them to settle, and they remain available for follow-up work.",
             },
         ],
     });

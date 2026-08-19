@@ -159,6 +159,7 @@ its public methods, and its storage and event contracts.
 
 | Module                                           | What it adds                                                                                         |
 | ------------------------------------------------ | ---------------------------------------------------------------------------------------------------- |
+| [Abort](sources/abort/README.md)                 | One transactional cancellation across an agent and every recursively linked descendant.              |
 | [Collaboration](sources/collaboration/README.md) | Create collaborators and message them asynchronously, with a report to the creator when one stops.   |
 | [User input](sources/userInput/README.md)        | Questions an agent asks a person, and a durable wait for the answer that survives a restart.         |
 | [Presence](sources/presence/README.md)           | Configured versus effective availability, custom and temporary states, schedules, and status events. |
@@ -178,10 +179,11 @@ its public methods, and its storage and event contracts.
 
 Modules owning tables through their own migrations: auto, collaboration, events, goal,
 history, mcp, murmur, presence, profile, projects, scheduling, secrets, tasks, usage, user input,
-workflows, and workspaces. The rest own none: compute, config, gemini, git, image generation, model
-switch, observation, permissions, search, skills, system prompt, and titles. Compute, system prompt
-and titles use Agent KV only, terminals stores nothing anywhere because a terminal ends with the
-process behind it, and collaboration's migrations exist only to retire the tables it used to keep.
+workflows, and workspaces. The rest own none: abort, compute, config, gemini, git, image generation,
+model switch, observation, permissions, search, skills, system prompt, and titles. Compute, system
+prompt and titles use Agent KV only, terminals stores nothing anywhere because a terminal ends with
+the process behind it, and collaboration's migrations exist only to retire the tables it used to
+keep.
 
 Murmur owns two tables rather than one: a single row saying which person its identity belongs to,
 and the key–value table Murmur itself writes its cryptographic state into. They share a database
