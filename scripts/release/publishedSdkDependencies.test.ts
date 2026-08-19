@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 const PUBLISHED_SDK_PACKAGES = [
     "@slopus/happy-providers",
     "@slopus/happy-agent-base",
+    "@slopus/happy-agent-client",
     "@slopus/happy-agent-compute",
 ] as const;
 

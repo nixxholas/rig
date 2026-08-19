@@ -253,8 +253,8 @@ importers:
         specifier: npm:@slopus/happy-agent-base@0.0.21
         version: 0.0.21(@aws-sdk/credential-provider-node@3.972.71)(@opentelemetry/api@1.9.1)(@smithy/signature-v4@5.6.9)(@types/pg@8.15.6)(sql.js@1.14.1)(ws@8.21.1)(zod@4.4.3)
       '@slopus/happy-agent-client':
-        specifier: workspace:*
-        version: link:../happy-agent-client
+        specifier: 0.0.1
+        version: 0.0.1
       '@slopus/happy-agent-compute':
         specifier: npm:@slopus/happy-agent-compute@0.1.6
         version: 0.1.6
@@ -536,8 +536,8 @@ importers:
         specifier: workspace:*
         version: link:../happy-agent
       '@slopus/happy-agent-client':
-        specifier: workspace:*
-        version: link:../happy-agent-client
+        specifier: 0.0.1
+        version: 0.0.1
       '@slopus/happy-agent-modules':
         specifier: workspace:*
         version: link:../happy-agent-modules
@@ -582,8 +582,8 @@ importers:
         specifier: workspace:*
         version: link:../happy-agent
       '@slopus/happy-agent-client':
-        specifier: workspace:*
-        version: link:../happy-agent-client
+        specifier: 0.0.1
+        version: 0.0.1
       '@steve.kite/stdlib':
         specifier: 0.0.12
         version: 0.0.12
@@ -1917,6 +1917,10 @@ packages:
   '@slopus/happy-agent-base@0.0.21':
     resolution: {integrity: sha512-tIWgHHuyRMdLrw55/cr/sPMGy4ifzg0dX8LwzXkN6EmmXEnTeq+kP40ItDWzX9xAojXevjXF8Kizlnhwxxvu1w==}
     engines: {node: '>=22.19.0'}
+
+  '@slopus/happy-agent-client@0.0.1':
+    resolution: {integrity: sha512-8RrlH9OIhKZw2hJupJnWeZ8YrSJjiJy7pvLQjKKXd5w+EyPt+PNxptzkXiAekpJ1m7/WTJJSfUAosJkKMAYyAQ==}
+    engines: {node: '>=20'}
 
   '@slopus/happy-agent-compute@0.1.6':
     resolution: {integrity: sha512-9Bx9EC3vb2qQ8oHRZDGo7PDP0fUBH0G+eB8/J2P6vqgEVB8MCpBrhjsLM+Af6u0yrNuLRUBhSUc1MracgWjuKg==}
@@ -5057,6 +5061,10 @@ snapshots:
       - utf-8-validate
       - ws
       - zod
+
+  '@slopus/happy-agent-client@0.0.1':
+    dependencies:
+      '@sinclair/typebox': 0.34.49
 
   '@slopus/happy-agent-compute@0.1.6':
     dependencies:

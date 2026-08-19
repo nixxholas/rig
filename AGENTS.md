@@ -137,10 +137,15 @@ Always use `pnpm` for this project. Do not use `npm`, `npx`, or `yarn` for insta
 
 ## Published SDK dependencies
 
-`@slopus/happy-providers`, `@slopus/happy-agent-base`, and `@slopus/happy-agent-compute` are always
-consumed from their published npm versions, even though their sources live in this repository. Every
-package that depends on one of them pins the published version. Never change such a dependency to
-`workspace:*`, and never add a new one as a workspace link.
+`@slopus/happy-providers`, `@slopus/happy-agent-base`, `@slopus/happy-agent-client`, and
+`@slopus/happy-agent-compute` are always consumed from their published npm versions, even though
+their sources live in this repository. Every package that depends on one of them pins the published
+version. Never change such a dependency to `workspace:*`, and never add a new one as a workspace
+link.
+
+More generally, whether a dependency comes from npm or from this workspace is an explicit human
+decision. Never change a dependency from a published version to `workspace:*`, or from `workspace:*`
+to a published version, without direct human input in the current task.
 
 Every package must resolve the same published version of each of these, because pnpm gives a
 `workspace:*` link and a version pin two separate copies of the same package. Two copies mean two
