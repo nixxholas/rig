@@ -14,7 +14,8 @@ describe("fast inference mode", () => {
         const gym = await createGym({
             inference: (request, callIndex) => {
                 if (callIndex === 0) {
-                    expect(request.options.serviceTier).toBe("fast");
+                    // The provider wire names the tier "priority"; "fast" is its display name.
+                    expect(request.options.serviceTier).toBe("priority");
                     return { content: [{ text: "FAST_REQUEST_CAPTURED", type: "text" }] };
                 }
 

@@ -2279,13 +2279,13 @@ export class CodingAssistantApp implements Component, Focusable {
                 this.#agent.provider.id,
                 this.#agent.confirmedServiceTier ?? null,
             );
-            if (!this.#sessionBacked) {
-                this.#appendEntry({
-                    role: "event",
-                    title: "Fast mode",
-                    text: serviceTier === "fast" ? FAST_MODE_ON_MESSAGE : FAST_MODE_OFF_MESSAGE,
-                });
-            }
+            // The tier selection is applied client-side and travels with the next message, so
+            // this client confirms it; no session event echoes it back.
+            this.#appendEntry({
+                role: "event",
+                title: "Fast mode",
+                text: serviceTier === "fast" ? FAST_MODE_ON_MESSAGE : FAST_MODE_OFF_MESSAGE,
+            });
             this.#requestRender();
         };
         try {

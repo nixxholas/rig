@@ -24,6 +24,8 @@ const GYM_MODEL: AgentModel = {
     id: "openai/gym",
     name: "Gym",
     providerId: "gym",
+    // Scenarios exercise fast mode, so the gym model serves the priority tier like a real one.
+    serviceTiers: ["priority"],
 };
 
 const EMPTY_USAGE: SessionUsage = {
