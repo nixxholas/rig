@@ -86,8 +86,8 @@ export class AnthropicBedrockSession extends BaseSession {
         this.resolveInferenceMaxRetries = createInferenceMaxRetriesResolver(options);
         this.emptyResponseRetryWait = options.waitForInferenceRetry ?? waitForInferenceRetry;
         this.connection = new AnthropicBedrockConnection({
-            bearerToken: () => this.credential.credential.bearerToken,
             ...(options.client === undefined ? {} : { client: options.client }),
+            credential: this.credential,
             ...(this.endpoint === undefined ? {} : { endpoint: this.endpoint }),
             region: this.region,
             transport: this.transport,

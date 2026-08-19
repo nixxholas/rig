@@ -1,6 +1,7 @@
-import OpenAI, { APIError, BedrockOpenAI } from "openai";
+import OpenAI, { APIError } from "openai";
+import { bedrock } from "openai/providers/bedrock/aws";
 
-import type { CodexProviderCredential } from "@/vendors/VendorCredential.js";
+import { isBedrockCredential, type CodexProviderCredential } from "@/vendors/VendorCredential.js";
 
 /**
  * Bedrock's client, taught to keep the diagnostic AWS actually sent.
@@ -10,7 +11,7 @@ import type { CodexProviderCredential } from "@/vendors/VendorCredential.js";
  * it, and says there was none. Presenting the body as the error preserves the only description of
  * the failure a person can act on.
  */
-class MantleOpenAI extends BedrockOpenAI {
+class MantleOpenAI extends OpenAI {
     protected override makeStatusError(
         status: number,
         body: object,
@@ -36,15 +37,17 @@ export function createCodexClient(options: {
     credential: CodexProviderCredential;
     endpoint: string;
     installationId: string;
+    region: string;
     sessionId: string;
     userAgent: string;
     windowId: string;
 }): OpenAI {
-    if (options.credential.name === "bedrock-bearer-token") {
+    if (isBedrockCredential(options.credential)) {
+        const authentication =
+            options.credential.name === "bedrock-bearer-token"
+                ? { apiKey: options.credential.credential.bearerToken }
+                : { credentialProvider: options.credential.credential.provider };
         return new MantleOpenAI({
-            apiKey: options.credential.credential.bearerToken,
-            awsRegion: "us-east-1",
-            baseURL: options.endpoint,
             defaultHeaders: {
                 "x-amzn-mantle-client-agent": "codex",
                 "x-codex-beta-features": "remote_compaction_v2",
@@ -57,6 +60,11 @@ export function createCodexClient(options: {
                 "x-codex-window-id": options.windowId,
             },
             maxRetries: 0,
+            provider: bedrock({
+                ...authentication,
+                baseURL: options.endpoint,
+                region: options.region,
+            }),
         });
     }
     const accountId =

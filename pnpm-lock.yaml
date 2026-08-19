@@ -102,7 +102,7 @@ importers:
         version: link:../happy-agent-modules
       '@slopus/happy-providers':
         specifier: 0.0.10
-        version: 0.0.10(@aws-sdk/credential-provider-node@3.972.71)(@smithy/signature-v4@5.6.9)(ws@8.21.1)(zod@4.4.3)
+        version: 0.0.10(@aws-sdk/credential-provider-node@3.972.71)(@smithy/hash-node@4.5.2)(@smithy/signature-v4@5.6.9)(ws@8.21.1)(zod@4.4.3)
       '@slopus/rig-gym':
         specifier: workspace:*
         version: link:../gym
@@ -154,7 +154,7 @@ importers:
         version: 0.34.49
       '@slopus/happy-providers':
         specifier: 0.0.10
-        version: 0.0.10(@aws-sdk/credential-provider-node@3.972.71)(@smithy/signature-v4@5.6.9)(ws@8.21.1)(zod@4.4.3)
+        version: 0.0.10(@aws-sdk/credential-provider-node@3.972.71)(@smithy/hash-node@4.5.2)(@smithy/signature-v4@5.6.9)(ws@8.21.1)(zod@4.4.3)
       '@steve.kite/stdlib':
         specifier: 0.0.12
         version: 0.0.12
@@ -251,7 +251,7 @@ importers:
         version: link:../happy-agent
       '@slopus/happy-agent-base':
         specifier: npm:@slopus/happy-agent-base@0.0.22
-        version: 0.0.22(@aws-sdk/credential-provider-node@3.972.71)(@opentelemetry/api@1.9.1)(@smithy/signature-v4@5.6.9)(@types/pg@8.15.6)(sql.js@1.14.1)(ws@8.21.1)(zod@4.4.3)
+        version: 0.0.22(@aws-sdk/credential-provider-node@3.972.71)(@opentelemetry/api@1.9.1)(@smithy/hash-node@4.5.2)(@smithy/signature-v4@5.6.9)(@types/pg@8.15.6)(sql.js@1.14.1)(ws@8.21.1)(zod@4.4.3)
       '@slopus/happy-agent-client':
         specifier: 0.0.7
         version: 0.0.7
@@ -263,7 +263,7 @@ importers:
         version: link:../happy-agent-modules
       '@slopus/happy-providers':
         specifier: 0.0.10
-        version: 0.0.10(@aws-sdk/credential-provider-node@3.972.71)(@smithy/signature-v4@5.6.9)(ws@8.21.1)(zod@4.4.3)
+        version: 0.0.10(@aws-sdk/credential-provider-node@3.972.71)(@smithy/hash-node@4.5.2)(@smithy/signature-v4@5.6.9)(ws@8.21.1)(zod@4.4.3)
       '@steve.kite/stdlib':
         specifier: 0.0.12
         version: 0.0.12
@@ -339,7 +339,7 @@ importers:
         version: 0.1.7
       '@slopus/happy-providers':
         specifier: 0.0.10
-        version: 0.0.10(@aws-sdk/credential-provider-node@3.972.71)(@smithy/signature-v4@5.6.9)(ws@8.21.1)(zod@4.4.3)
+        version: 0.0.10(@aws-sdk/credential-provider-node@3.972.71)(@smithy/hash-node@4.5.2)(@smithy/signature-v4@5.6.9)(ws@8.21.1)(zod@4.4.3)
       '@slopus/murmur':
         specifier: 0.4.4
         version: 0.4.4
@@ -370,7 +370,7 @@ importers:
     devDependencies:
       '@slopus/happy-agent-base':
         specifier: npm:@slopus/happy-agent-base@0.0.22
-        version: 0.0.22(@aws-sdk/credential-provider-node@3.972.71)(@opentelemetry/api@1.9.1)(@smithy/signature-v4@5.6.9)(@types/pg@8.15.6)(sql.js@1.14.1)(ws@8.21.1)(zod@4.4.3)
+        version: 0.0.22(@aws-sdk/credential-provider-node@3.972.71)(@opentelemetry/api@1.9.1)(@smithy/hash-node@4.5.2)(@smithy/signature-v4@5.6.9)(@types/pg@8.15.6)(sql.js@1.14.1)(ws@8.21.1)(zod@4.4.3)
       '@types/node':
         specifier: ^24.0.10
         version: 24.13.3
@@ -430,12 +430,21 @@ importers:
       '@anthropic-ai/sdk':
         specifier: 0.110.0
         version: 0.110.0(zod@4.4.3)
+      '@aws-sdk/credential-provider-node':
+        specifier: 3.972.71
+        version: 3.972.71
       '@modelcontextprotocol/sdk':
         specifier: ^1.29.0
         version: 1.29.0(zod@4.4.3)
       '@sinclair/typebox':
         specifier: ^0.34.49
         version: 0.34.49
+      '@smithy/hash-node':
+        specifier: ^4.5.2
+        version: 4.5.2
+      '@smithy/signature-v4':
+        specifier: 5.6.9
+        version: 5.6.9
       '@steve.kite/stdlib':
         specifier: 0.0.12
         version: 0.0.12
@@ -444,7 +453,7 @@ importers:
         version: 1.0.7
       openai:
         specifier: 6.46.0
-        version: 6.46.0(@aws-sdk/credential-provider-node@3.972.71)(@smithy/signature-v4@5.6.9)(ws@8.21.1)(zod@4.4.3)
+        version: 6.46.0(@aws-sdk/credential-provider-node@3.972.71)(@smithy/hash-node@4.5.2)(@smithy/signature-v4@5.6.9)(ws@8.21.1)(zod@4.4.3)
       undici:
         specifier: ^8.8.0
         version: 8.8.0
@@ -567,7 +576,7 @@ importers:
         version: 0.1.3
       '@slopus/happy-agent-base':
         specifier: 0.0.22
-        version: 0.0.22(@aws-sdk/credential-provider-node@3.972.71)(@opentelemetry/api@1.9.1)(@smithy/signature-v4@5.6.9)(@types/pg@8.15.6)(sql.js@1.14.1)(ws@8.21.1)(zod@4.4.3)
+        version: 0.0.22(@aws-sdk/credential-provider-node@3.972.71)(@opentelemetry/api@1.9.1)(@smithy/hash-node@4.5.2)(@smithy/signature-v4@5.6.9)(@types/pg@8.15.6)(sql.js@1.14.1)(ws@8.21.1)(zod@4.4.3)
       '@slopus/happy-agent-client':
         specifier: 0.0.7
         version: 0.0.7
@@ -576,7 +585,7 @@ importers:
         version: 0.1.7
       '@slopus/happy-providers':
         specifier: 0.0.10
-        version: 0.0.10(@aws-sdk/credential-provider-node@3.972.71)(@smithy/signature-v4@5.6.9)(ws@8.21.1)(zod@4.4.3)
+        version: 0.0.10(@aws-sdk/credential-provider-node@3.972.71)(@smithy/hash-node@4.5.2)(@smithy/signature-v4@5.6.9)(ws@8.21.1)(zod@4.4.3)
       '@slopus/murmur':
         specifier: 0.4.4
         version: 0.4.4
@@ -2073,6 +2082,10 @@ packages:
     resolution: {integrity: sha512-rpCbCV+TimOBi3VLNBMmtTvgfOWcFIEAru3+TFlG87SL2F+te4jOnnNR+cf3uR4eJ5Qf4LnT80fqnBKgPRS6zA==}
     engines: {node: '>=18.0.0'}
 
+  '@smithy/core@3.33.2':
+    resolution: {integrity: sha512-CUGXpnPkVdjUCbix+83sWLW9VFgQOm44MDOx/ihITJMAnOZKvL8YYIc7DR9pP/tZ8CIRvMiON/TucvygqbHO3w==}
+    engines: {node: '>=18.0.0'}
+
   '@smithy/credential-provider-imds@4.4.13':
     resolution: {integrity: sha512-X+2HNZhWi5i3rJsCas0LPf6fTQUaKyJ40zd8aTO/bwpRfpU3biYaqLr7C1WMibL7PVKJalpi1PyybjGPNoHC8Q==}
     engines: {node: '>=18.0.0'}
@@ -2093,6 +2106,10 @@ packages:
 
   '@smithy/fetch-http-handler@5.6.10':
     resolution: {integrity: sha512-5/Yj9mS2JjTsB3B8ZX7euh77mrY9aXW23ag1yAmFykSRmA6vldqBrgqmSeQ50EjY+5SB8+aE4w14B6LKbBVEhQ==}
+    engines: {node: '>=18.0.0'}
+
+  '@smithy/hash-node@4.5.2':
+    resolution: {integrity: sha512-OcD8fGClTkP0BWHVEAgUp1RZyCw8cKfqTPQ+DgrSF5jvR8zKkw2Aud79L4G/1Fu3QKLcsHExxRIPQCcKx7+xkg==}
     engines: {node: '>=18.0.0'}
 
   '@smithy/is-array-buffer@2.2.0':
@@ -2169,6 +2186,10 @@ packages:
 
   '@smithy/types@4.16.1':
     resolution: {integrity: sha512-0JFs3V2y2M9tKW5na/qxe69Zv+uxLMO7QBbhxF/FHu/Gp2NFZAAL9tWl9PU02xxo07pb3G9FTyjNc6D5uZrJIg==}
+    engines: {node: '>=18.0.0'}
+
+  '@smithy/types@4.17.2':
+    resolution: {integrity: sha512-FOKpVZob9MPTn2znRzGrnsMHv7BOsKVw3XiP/cOyYLDVZ9qKp4nifIiSCuUU/fIj5Vu0UOAxCFr+qRAtG0NUkA==}
     engines: {node: '>=18.0.0'}
 
   '@smithy/url-parser@2.2.0':
@@ -5209,13 +5230,13 @@ snapshots:
 
   '@slopus/ghostty-web@0.1.3': {}
 
-  '@slopus/happy-agent-base@0.0.22(@aws-sdk/credential-provider-node@3.972.71)(@opentelemetry/api@1.9.1)(@smithy/signature-v4@5.6.9)(@types/pg@8.15.6)(sql.js@1.14.1)(ws@8.21.1)(zod@4.4.3)':
+  '@slopus/happy-agent-base@0.0.22(@aws-sdk/credential-provider-node@3.972.71)(@opentelemetry/api@1.9.1)(@smithy/hash-node@4.5.2)(@smithy/signature-v4@5.6.9)(@types/pg@8.15.6)(sql.js@1.14.1)(ws@8.21.1)(zod@4.4.3)':
     dependencies:
       '@electric-sql/pglite': 0.5.5
       '@libsql/client': 0.17.4
       '@paralleldrive/cuid2': 3.3.0
       '@sinclair/typebox': 0.34.49
-      '@slopus/happy-providers': 0.0.10(@aws-sdk/credential-provider-node@3.972.71)(@smithy/signature-v4@5.6.9)(ws@8.21.1)(zod@4.4.3)
+      '@slopus/happy-providers': 0.0.10(@aws-sdk/credential-provider-node@3.972.71)(@smithy/hash-node@4.5.2)(@smithy/signature-v4@5.6.9)(ws@8.21.1)(zod@4.4.3)
       '@steve.kite/stdlib': 0.0.12
       drizzle-orm: 0.45.2(@electric-sql/pglite@0.5.5)(@libsql/client@0.17.4)(@opentelemetry/api@1.9.1)(@types/pg@8.15.6)(postgres@3.4.9)(sql.js@1.14.1)
       postgres: 3.4.9
@@ -5297,7 +5318,7 @@ snapshots:
   '@slopus/happy-agent-supervisor@0.0.2-linux-x64':
     optional: true
 
-  '@slopus/happy-providers@0.0.10(@aws-sdk/credential-provider-node@3.972.71)(@smithy/signature-v4@5.6.9)(ws@8.21.1)(zod@4.4.3)':
+  '@slopus/happy-providers@0.0.10(@aws-sdk/credential-provider-node@3.972.71)(@smithy/hash-node@4.5.2)(@smithy/signature-v4@5.6.9)(ws@8.21.1)(zod@4.4.3)':
     dependencies:
       '@anthropic-ai/bedrock-sdk': 0.32.0(zod@4.4.3)
       '@anthropic-ai/claude-agent-sdk': 0.3.226(@anthropic-ai/sdk@0.110.0(zod@4.4.3))(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(zod@4.4.3)
@@ -5306,7 +5327,7 @@ snapshots:
       '@sinclair/typebox': 0.34.49
       '@steve.kite/stdlib': 0.0.12
       deunicode: 1.0.7
-      openai: 6.46.0(@aws-sdk/credential-provider-node@3.972.71)(@smithy/signature-v4@5.6.9)(ws@8.21.1)(zod@4.4.3)
+      openai: 6.46.0(@aws-sdk/credential-provider-node@3.972.71)(@smithy/hash-node@4.5.2)(@smithy/signature-v4@5.6.9)(ws@8.21.1)(zod@4.4.3)
       undici: 8.8.0
       wink-porter2-stemmer: 2.0.1
     optionalDependencies:
@@ -5341,6 +5362,11 @@ snapshots:
   '@smithy/core@3.29.8':
     dependencies:
       '@smithy/types': 4.16.1
+      tslib: 2.8.1
+
+  '@smithy/core@3.33.2':
+    dependencies:
+      '@smithy/types': 4.17.2
       tslib: 2.8.1
 
   '@smithy/credential-provider-imds@4.4.13':
@@ -5380,6 +5406,11 @@ snapshots:
     dependencies:
       '@smithy/core': 3.29.8
       '@smithy/types': 4.16.1
+      tslib: 2.8.1
+
+  '@smithy/hash-node@4.5.2':
+    dependencies:
+      '@smithy/core': 3.33.2
       tslib: 2.8.1
 
   '@smithy/is-array-buffer@2.2.0':
@@ -5491,6 +5522,10 @@ snapshots:
       tslib: 2.8.1
 
   '@smithy/types@4.16.1':
+    dependencies:
+      tslib: 2.8.1
+
+  '@smithy/types@4.17.2':
     dependencies:
       tslib: 2.8.1
 
@@ -6590,9 +6625,10 @@ snapshots:
     dependencies:
       wrappy: 1.0.2
 
-  openai@6.46.0(@aws-sdk/credential-provider-node@3.972.71)(@smithy/signature-v4@5.6.9)(ws@8.21.1)(zod@4.4.3):
+  openai@6.46.0(@aws-sdk/credential-provider-node@3.972.71)(@smithy/hash-node@4.5.2)(@smithy/signature-v4@5.6.9)(ws@8.21.1)(zod@4.4.3):
     optionalDependencies:
       '@aws-sdk/credential-provider-node': 3.972.71
+      '@smithy/hash-node': 4.5.2
       '@smithy/signature-v4': 5.6.9
       ws: 8.21.1
       zod: 4.4.3

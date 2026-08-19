@@ -189,6 +189,11 @@ export {
     type ResponsesSessionOptions,
 } from "@/protocol/responses/ResponsesSession.js";
 export {
+    BedrockAwsCredential,
+    type BedrockAwsCredentialLoadOptions,
+    type BedrockAwsCredentialValue,
+} from "@/vendors/bedrock/BedrockAwsCredential.js";
+export {
     BedrockBearerTokenCredential,
     type BedrockBearerTokenCredentialLoadOptions,
     type BedrockBearerTokenCredentialValue,

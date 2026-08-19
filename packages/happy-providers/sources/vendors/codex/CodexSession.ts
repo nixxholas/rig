@@ -19,7 +19,7 @@ import type { SessionModelConfiguration } from "@/core/SessionModelConfiguration
 import type { SessionReasoningEffort, SessionRunRequest } from "@/core/SessionRunRequest.js";
 import type { SessionTool } from "@/core/SessionTool.js";
 import { mapOpenAIResponseStream } from "@/protocol/responses/mapOpenAIResponseStream.js";
-import type { CodexProviderCredential } from "@/vendors/VendorCredential.js";
+import { isBedrockCredential, type CodexProviderCredential } from "@/vendors/VendorCredential.js";
 import {
     classifyCodexError,
     classifyCodexProviderError,
@@ -54,6 +54,7 @@ import { isRetryableCodexStreamError } from "@/vendors/codex/errors/codexErrors.
 import { recoverCodexUnauthorizedCredential } from "@/vendors/codex/impl/recoverCodexUnauthorizedCredential.js";
 import { resolveCodexReasoningEffort } from "@/vendors/codex/impl/resolveCodexReasoningEffort.js";
 import { resolveCodexSessionModelId } from "@/vendors/codex/impl/resolveCodexSessionModelId.js";
+import { BEDROCK_DEFAULT_REGION } from "@/vendors/bedrock/impl/bedrockConstants.js";
 import { settleCodexToolSearch } from "@/vendors/codex/impl/settleCodexToolSearch.js";
 import {
     resolveCodexStreamIdleTimeout,
@@ -79,6 +80,7 @@ export interface CodexSessionOptions extends InferenceRetryOptions {
     model?: string;
     modelConfigurations?: Readonly<Record<string, SessionModelConfiguration>>;
     parallelToolCalls?: boolean;
+    region?: string;
     streamIdleTimeoutMs?: number;
     tools?: readonly SessionTool[];
     transport?: CodexTransport;
@@ -90,6 +92,7 @@ export class CodexSession extends BaseSession {
     readonly endpoint: string;
     readonly model: string | undefined;
     readonly parallelToolCalls: boolean | undefined;
+    readonly region: string;
     readonly streamIdleTimeoutMs: number;
     readonly tools: readonly SessionTool[];
     readonly transport: CodexTransport;
@@ -119,6 +122,7 @@ export class CodexSession extends BaseSession {
         this.installationId = options.installationId;
         this.model = options.model;
         this.parallelToolCalls = options.parallelToolCalls;
+        this.region = options.region?.trim() || BEDROCK_DEFAULT_REGION;
         this.activeModel = options.model;
         this.#resolveInferenceMaxRetries = createInferenceMaxRetriesResolver(options);
         this.#emptyResponseRetryWait =
@@ -135,7 +139,7 @@ export class CodexSession extends BaseSession {
         });
         for (const [model, configuration] of Object.entries(options.modelConfigurations ?? {})) {
             this.modelConfigurations.set(
-                resolveCodexSessionModelId(model, this.credential.name === "bedrock-bearer-token"),
+                resolveCodexSessionModelId(model, isBedrockCredential(this.credential)),
                 cloneConfiguration(configuration),
             );
         }
@@ -149,7 +153,7 @@ export class CodexSession extends BaseSession {
         this.context = { instructions: this.activeConfiguration.instructions, messages: [] };
 
         this.sseConnection = new CodexSseConnection({
-            bedrock: () => this.credential.name === "bedrock-bearer-token",
+            bedrock: () => isBedrockCredential(this.credential),
             client: () => this.resolveClient(),
             idleTimeoutMs: this.streamIdleTimeoutMs,
             turnState: this.turnState,
@@ -179,10 +183,7 @@ export class CodexSession extends BaseSession {
         const model =
             requestedModel === undefined
                 ? undefined
-                : resolveCodexSessionModelId(
-                      requestedModel,
-                      this.credential.name === "bedrock-bearer-token",
-                  );
+                : resolveCodexSessionModelId(requestedModel, isBedrockCredential(this.credential));
         if (model === undefined) throw new Error("A model is required for Codex compaction.");
         this.activeModel = model;
         const effort = resolveCodexReasoningEffort(model, this.activeEffort);
@@ -231,7 +232,7 @@ export class CodexSession extends BaseSession {
                 (tool) => tool.server === undefined && tool.defer !== true,
             ),
         };
-        if (this.credential.name === "bedrock-bearer-token") {
+        if (isBedrockCredential(this.credential)) {
             return this.compactBedrockContext(
                 context,
                 compactionConfiguration,
@@ -483,10 +484,7 @@ export class CodexSession extends BaseSession {
         const model =
             requestedModel === undefined
                 ? undefined
-                : resolveCodexSessionModelId(
-                      requestedModel,
-                      this.credential.name === "bedrock-bearer-token",
-                  );
+                : resolveCodexSessionModelId(requestedModel, isBedrockCredential(this.credential));
         if (model === undefined) throw new Error("A model is required for Codex inference.");
         const configuration = this.resolveConfiguration(model);
         const effort = resolveCodexReasoningEffort(model, request.effort);
@@ -818,6 +816,7 @@ export class CodexSession extends BaseSession {
             credential: this.credential,
             endpoint: this.endpoint,
             installationId: this.installationId,
+            region: this.region,
             sessionId: this.id,
             userAgent: this.userAgent,
             windowId: this.windowId,
@@ -831,12 +830,13 @@ export class CodexSession extends BaseSession {
     }
 
     private websocketHeaders(): Record<string, string> {
+        if (isBedrockCredential(this.credential)) {
+            throw new Error("Amazon Bedrock does not support the Codex WebSocket transport.");
+        }
         const token =
             this.credential.name === "codex-session"
                 ? this.credential.credential.accessToken
-                : this.credential.name === "codex-api-key"
-                  ? this.credential.credential.apiKey
-                  : this.credential.credential.bearerToken;
+                : this.credential.credential.apiKey;
         const accountId =
             this.credential.name === "codex-session"
                 ? this.credential.credential.accountId

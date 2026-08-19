@@ -2,7 +2,7 @@ import { BaseProvider } from "@/core/BaseProvider.js";
 import type { InferenceRetryOptions } from "@/core/inferenceRetrySettings.js";
 import type { ProviderModality } from "@/core/ProviderModality.js";
 import type { SessionOptions } from "@/core/SessionOptions.js";
-import type { AnthropicCredential } from "@/vendors/VendorCredential.js";
+import { isBedrockCredential, type AnthropicCredential } from "@/vendors/VendorCredential.js";
 import {
     AnthropicBedrockProvider,
     type AnthropicBedrockProviderOptions as NativeAnthropicBedrockProviderOptions,
@@ -23,7 +23,7 @@ type AnthropicBedrockOptions = NativeAnthropicBedrockProviderOptions;
 
 /**
  * The credential is the transport discriminator: Claude credentials use the
- * Anthropic Agent SDK, while a Bedrock bearer token uses Amazon Bedrock.
+ * Anthropic Agent SDK, while a Bedrock credential uses Amazon Bedrock.
  */
 export type AnthropicProviderOptions = AnthropicClaudeOptions | AnthropicBedrockOptions;
 
@@ -56,7 +56,7 @@ export class AnthropicProvider extends BaseProvider {
     constructor(options: AnthropicProviderOptions | AnthropicCredentialProviderOptions) {
         super();
         this.credential = options.credential;
-        if (options.credential.name === "bedrock-bearer-token") {
+        if (isBedrockCredential(options.credential)) {
             // TypeScript does not narrow a containing union from a nested
             // discriminant. The credential name is the public discriminator.
             this.#provider = new AnthropicBedrockProvider(options as AnthropicBedrockOptions);

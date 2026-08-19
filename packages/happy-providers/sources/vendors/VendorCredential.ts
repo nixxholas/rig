@@ -1,3 +1,4 @@
+import type { BedrockAwsCredential } from "@/vendors/bedrock/BedrockAwsCredential.js";
 import type { BedrockBearerTokenCredential } from "@/vendors/bedrock/BedrockBearerTokenCredential.js";
 import type { ClaudeApiKeyCredential } from "@/vendors/claude/ClaudeApiKeyCredential.js";
 import type { ClaudeAuthTokenCredential } from "@/vendors/claude/ClaudeAuthTokenCredential.js";
@@ -9,7 +10,7 @@ import type { GeminiApiKeyCredential } from "@/vendors/gemini/GeminiApiKeyCreden
 import type { GrokApiKeyCredential } from "@/vendors/grok/GrokApiKeyCredential.js";
 import type { GrokSessionCredential } from "@/vendors/grok/GrokSessionCredential.js";
 
-export type BedrockCredential = BedrockBearerTokenCredential;
+export type BedrockCredential = BedrockAwsCredential | BedrockBearerTokenCredential;
 
 export type ClaudeCredential =
     | ClaudeApiKeyCredential
@@ -32,3 +33,9 @@ export type VendorCredential =
     | CodexCredential
     | GeminiCredential
     | GrokCredential;
+
+export function isBedrockCredential(value: unknown): value is BedrockCredential {
+    if (typeof value !== "object" || value === null || !("name" in value)) return false;
+    const name = (value as { name: unknown }).name;
+    return name === "bedrock-aws" || name === "bedrock-bearer-token";
+}

@@ -6,7 +6,7 @@ import {
     type InferenceRetryOptions,
 } from "@/core/inferenceRetrySettings.js";
 import { ResponsesProvider } from "@/protocol/responses/ResponsesProvider.js";
-import type { CodexProviderCredential } from "@/vendors/VendorCredential.js";
+import { isBedrockCredential, type CodexProviderCredential } from "@/vendors/VendorCredential.js";
 import {
     BEDROCK_DEFAULT_REGION,
     bedrockMantleEndpoint,
@@ -51,6 +51,7 @@ export class CodexProvider extends ResponsesProvider {
     readonly endpoint: string;
     readonly model: string | undefined;
     readonly parallelToolCalls: boolean | undefined;
+    readonly region: string;
     readonly streamIdleTimeoutMs: number;
     readonly transport: CodexTransport;
     readonly userAgent: string | undefined;
@@ -61,12 +62,13 @@ export class CodexProvider extends ResponsesProvider {
         super();
         assertCodexCredential(options.credential);
         this.credential = options.credential;
-        const isBedrock = options.credential.name === "bedrock-bearer-token";
+        const isBedrock = isBedrockCredential(options.credential);
         const region =
             options.region?.trim() ||
             process.env.AWS_REGION?.trim() ||
             process.env.AWS_DEFAULT_REGION?.trim() ||
             BEDROCK_DEFAULT_REGION;
+        this.region = region;
         this.endpoint =
             options.endpoint ??
             (isBedrock
@@ -91,7 +93,7 @@ export class CodexProvider extends ResponsesProvider {
     }
 
     async generateImage(request: GenerateCodexImageRequest): Promise<GenerateCodexImageResult> {
-        if (this.credential.name === "bedrock-bearer-token") {
+        if (isBedrockCredential(this.credential)) {
             throw new Error("Codex image generation is unavailable through Bedrock.");
         }
         const userAgent = this.userAgent ?? (await resolveCodexUserAgent());
@@ -115,6 +117,7 @@ export class CodexProvider extends ResponsesProvider {
             ...(this.parallelToolCalls === undefined
                 ? {}
                 : { parallelToolCalls: this.parallelToolCalls }),
+            region: this.region,
             resolveInferenceMaxRetries: sessionInferenceMaxRetriesResolver(
                 options,
                 () => this.inferenceMaxRetries,

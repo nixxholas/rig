@@ -162,6 +162,7 @@ The session lifecycle is the same for every provider; only construction and vend
 ```ts
 import {
     AnthropicProvider,
+    BedrockAwsCredential,
     BedrockBearerTokenCredential,
     ClaudeCodeCredential,
     GrokProvider,
@@ -190,7 +191,9 @@ if (grokCredential !== null) {
     await session.destroy();
 }
 
-const bedrockCredential = await BedrockBearerTokenCredential.tryLoad();
+const bedrockCredential =
+    (await BedrockBearerTokenCredential.tryLoad()) ??
+    (await BedrockAwsCredential.tryLoad({ profile: process.env.AWS_PROFILE }));
 if (bedrockCredential !== null) {
     const bedrock = new AnthropicProvider({
         credential: bedrockCredential,

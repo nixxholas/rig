@@ -1,4 +1,5 @@
 import type { BetaRawMessageStreamEvent } from "@anthropic-ai/sdk/resources/beta/messages/messages";
+import type { BedrockCredential } from "@/vendors/VendorCredential.js";
 import type { AnthropicBedrockTransport } from "@/vendors/bedrock/AnthropicBedrockTransport.js";
 import {
     createAnthropicBedrockClient,
@@ -8,18 +9,18 @@ import {
 /**
  * The Bedrock client a session talks through, built once and kept.
  *
- * Bedrock authenticates with a bearer token the SDK captures at construction, so the client is
- * created on first use rather than in the constructor — a session may be built before its
- * credential is ready. Callers that need the client itself, such as native compaction, borrow it
- * through {@link client}; everything else goes out over {@link stream}.
+ * The client is created on first use so either its bearer token or refreshable AWS credential
+ * provider is installed at the same lifetime boundary as the connection. Callers that need the
+ * client itself, such as native compaction, borrow it through {@link client}; everything else goes
+ * out over {@link stream}.
  */
 export class AnthropicBedrockConnection {
     private cached: AnthropicBedrockClient | undefined;
 
     constructor(
         private readonly options: {
-            bearerToken: () => string;
             client?: AnthropicBedrockClient;
+            credential: BedrockCredential;
             endpoint?: string;
             region: string;
             transport: AnthropicBedrockTransport;
@@ -31,7 +32,7 @@ export class AnthropicBedrockConnection {
 
     client(): AnthropicBedrockClient {
         return (this.cached ??= createAnthropicBedrockClient({
-            bearerToken: this.options.bearerToken(),
+            credential: this.options.credential,
             ...(this.options.endpoint === undefined ? {} : { endpoint: this.options.endpoint }),
             region: this.options.region,
             transport: this.options.transport,

@@ -1,4 +1,4 @@
-import type { CodexProviderCredential } from "@/vendors/VendorCredential.js";
+import { isBedrockCredential, type CodexProviderCredential } from "@/vendors/VendorCredential.js";
 
 export function assertCodexCredential(value: unknown): asserts value is CodexProviderCredential {
     if (
@@ -7,10 +7,10 @@ export function assertCodexCredential(value: unknown): asserts value is CodexPro
         "name" in value &&
         ((value as { name: unknown }).name === "codex-api-key" ||
             (value as { name: unknown }).name === "codex-session" ||
-            (value as { name: unknown }).name === "bedrock-bearer-token")
+            isBedrockCredential(value))
     )
         return;
     throw new Error(
-        "CodexProvider requires a Codex API key, Codex session, or Bedrock bearer token credential.",
+        "CodexProvider requires a Codex API key, Codex session, or Bedrock credential.",
     );
 }

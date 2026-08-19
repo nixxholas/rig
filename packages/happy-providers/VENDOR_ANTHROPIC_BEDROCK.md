@@ -1,11 +1,12 @@
 # Anthropic Bedrock transport
 
 The public `AnthropicProvider` selects its internal Bedrock implementation whenever it receives a
-`BedrockBearerTokenCredential`. That implementation sends Anthropic Messages API requests directly
-to Amazon Bedrock through `@anthropic-ai/bedrock-sdk`. It supports the Anthropic-compatible Mantle
-endpoint and Bedrock Runtime, preferring Mantle when the selected model is available in-region. Its
-caller supplies the complete system instructions and tool definitions; the provider does not
-launch Claude Code or adopt its tool execution and permission runtime.
+`BedrockBearerTokenCredential` or `BedrockAwsCredential`. That implementation sends Anthropic
+Messages API requests directly to Amazon Bedrock through `@anthropic-ai/bedrock-sdk`. It supports
+the Anthropic-compatible Mantle endpoint and Bedrock Runtime, preferring Mantle when the selected
+model is available in-region. Its caller supplies the complete system instructions and tool
+definitions; the provider does not launch Claude Code or adopt its tool execution and permission
+runtime.
 
 ## Request contract
 
@@ -76,12 +77,18 @@ Rig never sends a separate summarization request.
 
 ## Credentials
 
-Load `BedrockBearerTokenCredential`, normally from `AWS_BEARER_TOKEN_BEDROCK`. The provider accepts
-an explicit region and otherwise defaults to `us-east-1`; environment resolution belongs to the
+Load `BedrockBearerTokenCredential`, normally from `AWS_BEARER_TOKEN_BEDROCK`, or load
+`BedrockAwsCredential` from the standard AWS Node credential chain. Named and default shared
+profiles support `credential_process`; the AWS SDK validates the process result, memoizes it, and
+refreshes expiring credentials. AWS credentials SigV4-sign both Mantle and Runtime requests and
+cannot be displaced by an ambient Bedrock bearer token. The provider accepts an explicit region
+and otherwise defaults to `us-east-1`; environment resolution belongs to the
 executor/configuration layer.
 
 ## Verification
 
+`tests/bedrockAwsCredential.test.ts` executes a real fixture `credential_process` and verifies the
+resulting OpenAI Mantle, Anthropic Mantle, and Anthropic Runtime SigV4 request headers.
 `tests/anthropicBedrockProvider.test.ts` exercises regional routing, signed-thinking replay,
 provider-owned retry, native compaction, Mantle and Runtime wire shapes, exact current Rig prompt
 and tools, and the captured Claude golden response stream.

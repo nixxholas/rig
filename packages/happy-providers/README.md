@@ -14,9 +14,9 @@ never think about keep-alive, reconnects, or which wire protocol a vendor speaks
 messages wherever we can classify them; only genuinely unknown failures fall back to an
 unclassified error, and even those arrive readable.
 
-🔑 **Coding-assistant credentials and tokens** — reuse the credentials your local Codex or Claude
-Code installation already manages, pass an API key or bearer token directly, or discover every
-account on the machine and let the user pick.
+🔑 **Coding-assistant credentials and tokens** — reuse the credentials your local Codex, Claude
+Code, or AWS installation already manages, pass an API key or bearer token directly, or discover
+every account on the machine and let the user pick.
 
 🧪 **Tested against the real thing** — golden traces are captured from the actual Codex, Claude
 Code, and Grok clients talking to their real backends, and the test suite verifies our requests
@@ -141,12 +141,12 @@ needed for the next turn.
 
 ## Providers and credentials
 
-| Provider            | Talks to                                               | Credential options                                               |
-| ------------------- | ------------------------------------------------------ | ---------------------------------------------------------------- |
-| `AnthropicProvider` | Claude Code SDK or Anthropic Messages on Bedrock       | Claude Code, OAuth, auth token, API key, or Bedrock bearer token |
-| `CodexProvider`     | OpenAI Responses, Responses Lite, or OpenAI on Bedrock | Codex session, OpenAI API key, Bedrock bearer token              |
-| `GrokProvider`      | Grok Responses-compatible protocol                     | Grok session or xAI API key                                      |
-| `ResponsesProvider` | Any generic Responses-compatible endpoint              | Explicit endpoint and API key                                    |
+| Provider            | Talks to                                               | Credential options                                                                |
+| ------------------- | ------------------------------------------------------ | --------------------------------------------------------------------------------- |
+| `AnthropicProvider` | Claude Code SDK or Anthropic Messages on Bedrock       | Claude Code, OAuth, auth token, API key, Bedrock bearer token, or AWS credentials |
+| `CodexProvider`     | OpenAI Responses, Responses Lite, or OpenAI on Bedrock | Codex session, OpenAI API key, Bedrock bearer token, or AWS credentials           |
+| `GrokProvider`      | Grok Responses-compatible protocol                     | Grok session or xAI API key                                                       |
+| `ResponsesProvider` | Any generic Responses-compatible endpoint              | Explicit endpoint and API key                                                     |
 
 You always choose the credential; the library never picks an account for you. Each vendor
 credential class has a `tryLoad()` that accepts explicit values or reads the native client's
@@ -156,8 +156,10 @@ discovers everything available on the machine.
 For Anthropic there is deliberately no second provider choice. Construct `AnthropicProvider`
 with whichever credential the user selected. `ClaudeCodeCredential`, `ClaudeOAuthCredential`,
 `ClaudeAuthTokenCredential`, and `ClaudeApiKeyCredential` select the persistent Claude Agent SDK
-implementation. `BedrockBearerTokenCredential` selects Anthropic Messages on Bedrock. The
-provider's canonical `name` remains `"claude"` on either transport.
+implementation. `BedrockBearerTokenCredential` and `BedrockAwsCredential` select Anthropic
+Messages on Bedrock. The AWS credential uses the standard Node credential chain, including shared
+profiles with `credential_process`, and SigV4-signs requests. The provider's canonical `name`
+remains `"claude"` on either transport.
 
 Credentials are reusable: load one once and share it across every session you open — sessions
 don't take ownership of it, and there is no need to reload it per conversation. Token refreshing
@@ -535,10 +537,11 @@ Every option each provider constructor accepts, and how the defaults are chosen.
 
 ### `CodexProvider` (OpenAI Codex)
 
-- `credential` _(required)_ — a Codex session, an OpenAI API key, or a Bedrock bearer token. The
-  credential also picks the default endpoint: a Codex session talks to
-  `https://chatgpt.com/backend-api`, an API key to `https://api.openai.com/v1`, and a Bedrock
-  bearer token to the Bedrock Mantle endpoint for the resolved region.
+- `credential` _(required)_ — a Codex session, an OpenAI API key, a Bedrock bearer token, or AWS
+  credentials. The credential also picks the default endpoint: a Codex session talks to
+  `https://chatgpt.com/backend-api`, an API key to `https://api.openai.com/v1`, and either Bedrock
+  credential to the Bedrock Mantle endpoint for the resolved region. AWS credentials use SigV4
+  and remain refreshable through the credential provider chain.
 - `endpoint` — overrides that default endpoint.
 - `model` — the session's default model, resolved against the curated catalog. On Bedrock the
   catalog maps it to the corresponding Bedrock model ID.
@@ -571,14 +574,29 @@ separate Bedrock provider class in the public API:
 - A `ClaudeCodeCredential`, `ClaudeOAuthCredential`, `ClaudeAuthTokenCredential`, or
   `ClaudeApiKeyCredential` uses the Anthropic Agent SDK. This branch accepts `env`, `model`,
   `onAccountUsage`, `pathToClaudeCodeExecutable`, `query`, and `userAgent`.
-- A `BedrockBearerTokenCredential` uses Anthropic Messages on Amazon Bedrock. This branch accepts
-  `client`, `endpoint`, `model`, `region` (default `us-east-1`), `transport` (`"mantle"` by
-  default, or `"runtime"`), and `userAgent`.
+- A `BedrockBearerTokenCredential` or `BedrockAwsCredential` uses Anthropic Messages on Amazon
+  Bedrock. This branch accepts `client`, `endpoint`, `model`, `region` (default `us-east-1`),
+  `transport` (`"mantle"` by default, or `"runtime"`), and `userAgent`.
 
 The exported `AnthropicProviderOptions` union describes both credential-specific option shapes. A
 credential selected dynamically may remain typed as the complete `AnthropicCredential` union;
 the common `{ credential, model, userAgent }` constructor shape accepts it directly. `query` and
 `client` are advanced injection seams for tests; production callers normally leave them unset.
+
+`BedrockAwsCredential.tryLoad()` uses the standard AWS Node credential chain. Pass `profile` to
+select a shared-config profile explicitly; otherwise `AWS_PROFILE`, environment credentials,
+shared files, web identity, and instance/container credentials follow normal AWS precedence. A
+profile containing `credential_process` is executed by the AWS SDK, and expiring credentials are
+refreshed by the same provider:
+
+```ini
+[profile work-bedrock]
+credential_process = /usr/local/bin/aws-credential-helper work
+```
+
+```ts
+const credential = await BedrockAwsCredential.tryLoad({ profile: "work-bedrock" });
+```
 
 ### `GrokProvider` (Grok Build)
 

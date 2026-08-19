@@ -1,3 +1,4 @@
+import { BedrockAwsCredential } from "@/vendors/bedrock/BedrockAwsCredential.js";
 import { BedrockBearerTokenCredential } from "@/vendors/bedrock/BedrockBearerTokenCredential.js";
 import { ClaudeApiKeyCredential } from "@/vendors/claude/ClaudeApiKeyCredential.js";
 import { ClaudeAuthTokenCredential } from "@/vendors/claude/ClaudeAuthTokenCredential.js";
@@ -10,6 +11,9 @@ import { GrokSessionCredential } from "@/vendors/grok/GrokSessionCredential.js";
 import type { VendorCredential } from "@/vendors/VendorCredential.js";
 
 export interface TryLoadCredentialsOptions {
+    bedrockAwsConfigFilepath?: string;
+    bedrockAwsCredentialsFilepath?: string;
+    bedrockAwsProfile?: string;
     bedrockBearerToken?: string;
     bedrockBearerTokenEnvVar?: string;
     claudeApiKey?: string;
@@ -28,6 +32,10 @@ export async function tryLoadCredentials(
     options: TryLoadCredentialsOptions = {},
 ): Promise<VendorCredential[]> {
     const env = options.env;
+    const explicitAws =
+        options.bedrockAwsConfigFilepath !== undefined ||
+        options.bedrockAwsCredentialsFilepath !== undefined ||
+        options.bedrockAwsProfile !== undefined;
     const credentials = await Promise.all([
         BedrockBearerTokenCredential.tryLoad({
             ...(env === undefined ? {} : { env }),
@@ -38,6 +46,19 @@ export async function tryLoadCredentials(
                 ? {}
                 : { bearerTokenEnvVar: options.bedrockBearerTokenEnvVar }),
         }),
+        env === undefined || explicitAws
+            ? BedrockAwsCredential.tryLoad({
+                  ...(options.bedrockAwsConfigFilepath === undefined
+                      ? {}
+                      : { configFilepath: options.bedrockAwsConfigFilepath }),
+                  ...(options.bedrockAwsCredentialsFilepath === undefined
+                      ? {}
+                      : { credentialsFilepath: options.bedrockAwsCredentialsFilepath }),
+                  ...(options.bedrockAwsProfile === undefined
+                      ? {}
+                      : { profile: options.bedrockAwsProfile }),
+              })
+            : null,
         ClaudeApiKeyCredential.tryLoad({
             ...(env === undefined ? {} : { env }),
             ...(options.claudeApiKey === undefined ? {} : { apiKey: options.claudeApiKey }),
