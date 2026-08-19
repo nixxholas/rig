@@ -36,6 +36,7 @@ import {
     historyBlockSchema,
     historyMessageSchema,
     historyMessageInputSchema,
+    historyMessageModeSchema,
     historyMutationIdSchema,
     historyMessageWithinPersistenceBounds,
     historyAgentIdSchema,
@@ -58,6 +59,7 @@ import {
     type HistoryBlock,
     type HistoryMessage,
     type HistoryMessageInput,
+    type HistoryMessageMode,
 } from "./HistoryMessage.js";
 import {
     historyPageSchema,
@@ -1519,6 +1521,15 @@ export class HistoryModule implements AgentModule {
                 (Value.Check(historyMutationIdSchema, metadataMutationId)
                     ? (metadataMutationId as string)
                     : undefined);
+            // A message sent from outside the API — a phone, another module — has no pending
+            // row, but still runs with a composer selection; it may stamp that selection on
+            // its metadata the way the API does.
+            const metadataMode = accepted.metadata?.["mode"];
+            const mode =
+                pending?.mode ??
+                (Value.Check(historyMessageModeSchema, metadataMode)
+                    ? (metadataMode as HistoryMessageMode)
+                    : undefined);
             const happyMetadata = accepted.metadata?.["happy"];
             const remoteMessageId = Value.Check(happyMessageMetadataSchema, happyMetadata)
                 ? (happyMetadata as HappyMessageMetadata).remoteMessageId
@@ -1544,7 +1555,7 @@ export class HistoryModule implements AgentModule {
                           delivery:
                               pending?.delivery ??
                               (accepted.kind === "steering" ? "steer" : "queue"),
-                          ...(pending === undefined ? {} : { mode: pending.mode }),
+                          ...(mode === undefined ? {} : { mode }),
                           ...(mutationId === undefined ? {} : { mutationId }),
                       }
                     : {}),

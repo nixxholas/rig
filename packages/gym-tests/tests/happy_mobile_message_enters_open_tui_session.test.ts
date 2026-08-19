@@ -2,7 +2,6 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { createGym, type Gym } from "@slopus/rig-gym";
 import { decryptHappyPayload, encryptHappyPayload } from "@slopus/happy-agent-modules";
-import { libsqlCommonJsScript } from "./libsqlScript.js";
 
 const running = new Set<Gym>();
 
@@ -113,9 +112,11 @@ describe("Happy mobile input", () => {
             content: [{ text: "Continue from Happy mobile.", type: "text" }],
             role: "user",
         });
+        // The session publishes with its creation-time mode: the terminal's own mode
+        // selection travels with each message it sends, not with the agent object.
         expect(publishedMetadata).toMatchObject({
             capabilities: { permissionModeSelection: true },
-            currentOperatingModeCode: "full_access",
+            currentOperatingModeCode: "auto",
             operatingModes: [
                 { code: "auto", kind: "safe-yolo", value: "Auto" },
                 {
@@ -126,22 +127,51 @@ describe("Happy mobile input", () => {
                 { code: "read_only", kind: "read-only", value: "Read only" },
                 { code: "full_access", kind: "yolo", value: "Full access" },
             ],
-            permissionMode: "full_access",
+            permissionMode: "auto",
         });
         const stored = await gym.runInContainer("node", [
             "-e",
-            libsqlCommonJsScript(`
-const database = await openDatabase("/home/rig/.server/sessions.sqlite", true);
-let permissionMode;
-try {
-    permissionMode = (
-        await database.execute("select permission_mode from sessions limit 1")
-    ).rows[0].permission_mode;
-} finally {
-    await database.close();
+            `
+const { readFileSync } = require("node:fs");
+const { request } = require("node:http");
+const { join } = require("node:path");
+const directory = join(process.env.HOME, ".happy", "agent");
+const token = readFileSync(join(directory, "token"), "utf8").trim();
+const socketPath = join(directory, "server.sock");
+function call(path) {
+    return new Promise((resolve, reject) => {
+        const outgoing = request(
+            { headers: { authorization: "Bearer " + token }, method: "GET", path, socketPath },
+            (response) => {
+                let data = "";
+                response.on("data", (chunk) => { data += chunk; });
+                response.on("end", () => resolve(JSON.parse(data)));
+            },
+        );
+        outgoing.on("error", reject);
+        outgoing.end();
+    });
 }
-process.stdout.write(permissionMode);
-`),
+(async () => {
+    const bootstrap = await call("/v0/bootstrap/desktop");
+    const agents = bootstrap.workspaces.flatMap((workspace) => workspace.agents ?? []);
+    const listed = await call("/v0/agents/" + agents[0].id + "/messages?limit=100");
+    const mobile = listed.runs
+        .flatMap((run) => run.messages)
+        .find(
+            (message) =>
+                message.role === "user" &&
+                message.content.some(
+                    (block) =>
+                        block.type === "text" && block.text.includes("Continue from Happy mobile."),
+                ),
+        );
+    process.stdout.write(mobile.mode.permissionMode);
+})().catch((error) => {
+    process.stderr.write(String(error));
+    process.exit(1);
+});
+`,
         ]);
         expect(stored.stdout).toBe("read_only");
     }, 60_000);

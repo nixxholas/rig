@@ -90,11 +90,7 @@ describe("Happy machine registration", () => {
         expect(registeredMachine?.id).not.toBe("native-happy-machine");
         expect(registeredMachine?.metadata).toMatchObject({
             capabilities: { newSession: true, resume: false, worktrees: false },
-            cliAvailability: {
-                claude: false,
-                codex: false,
-                rig: true,
-            },
+            client: { id: "rig", name: "Rig" },
             defaults: { permissionMode: "auto" },
             machineKind: "rig",
             models: expect.arrayContaining([
@@ -114,9 +110,8 @@ describe("Happy machine registration", () => {
             "-e",
             [
                 'const fs=require("node:fs")',
-                'const dir="/home/rig/.happy/rig/happy/machines"',
-                'const files=fs.readdirSync(dir).filter(file=>file.endsWith(".json"))',
-                'process.stdout.write(JSON.parse(fs.readFileSync(`${dir}/${files[0]}`,"utf8")).id)',
+                'const path="/home/rig/.happy/agent/happy/machine.json"',
+                'process.stdout.write(JSON.parse(fs.readFileSync(path,"utf8")).id)',
             ].join(";"),
         ]);
         expect(identity.stdout).toBe(registeredMachine?.id);

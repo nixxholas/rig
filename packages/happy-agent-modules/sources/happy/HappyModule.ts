@@ -494,7 +494,18 @@ function messageFrom(message: HappyInboundMessage): SessionUserMessage {
 function messageOptionsFor(selection: HappySelection): AgentBaseMessageOptions {
     return {
         effort: selection.effort as never,
-        metadata: { ...USER_MESSAGE_ORIGIN_METADATA },
+        metadata: {
+            ...USER_MESSAGE_ORIGIN_METADATA,
+            // The composer selection this message runs with, stamped the way the API
+            // stamps its own sends so history shows the phone's mode too.
+            mode: {
+                effort: selection.effort,
+                modelId: selection.modelId,
+                permissionMode: selection.permissionMode,
+                providerId: selection.providerId,
+                serviceTier: null,
+            },
+        },
         model: selection.modelId,
         permissionMode: selection.permissionMode,
         provider: selection.providerId,
