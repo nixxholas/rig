@@ -250,8 +250,8 @@ importers:
         specifier: workspace:*
         version: link:../happy-agent
       '@slopus/happy-agent-base':
-        specifier: npm:@slopus/happy-agent-base@0.0.21
-        version: 0.0.21(@aws-sdk/credential-provider-node@3.972.71)(@opentelemetry/api@1.9.1)(@smithy/signature-v4@5.6.9)(@types/pg@8.15.6)(sql.js@1.14.1)(ws@8.21.1)(zod@4.4.3)
+        specifier: npm:@slopus/happy-agent-base@0.0.22
+        version: 0.0.22(@aws-sdk/credential-provider-node@3.972.71)(@opentelemetry/api@1.9.1)(@smithy/signature-v4@5.6.9)(@types/pg@8.15.6)(sql.js@1.14.1)(ws@8.21.1)(zod@4.4.3)
       '@slopus/happy-agent-client':
         specifier: 0.0.1
         version: 0.0.1
@@ -369,8 +369,8 @@ importers:
         version: 8.21.1
     devDependencies:
       '@slopus/happy-agent-base':
-        specifier: npm:@slopus/happy-agent-base@0.0.21
-        version: 0.0.21(@aws-sdk/credential-provider-node@3.972.71)(@opentelemetry/api@1.9.1)(@smithy/signature-v4@5.6.9)(@types/pg@8.15.6)(sql.js@1.14.1)(ws@8.21.1)(zod@4.4.3)
+        specifier: npm:@slopus/happy-agent-base@0.0.22
+        version: 0.0.22(@aws-sdk/credential-provider-node@3.972.71)(@opentelemetry/api@1.9.1)(@smithy/signature-v4@5.6.9)(@types/pg@8.15.6)(sql.js@1.14.1)(ws@8.21.1)(zod@4.4.3)
       '@types/node':
         specifier: ^24.0.10
         version: 24.13.3
@@ -1963,8 +1963,8 @@ packages:
   '@slopus/ghostty-wasm@1.3.6':
     resolution: {integrity: sha512-S8KS9VyGgv451D8ZrRoS5vAg1Eqk8dZJWzM28HrjXVmD1B8g3Ec1QsjUWAIVqReuZyZqLFxZfjH6rU0N/f7n2Q==}
 
-  '@slopus/happy-agent-base@0.0.21':
-    resolution: {integrity: sha512-tIWgHHuyRMdLrw55/cr/sPMGy4ifzg0dX8LwzXkN6EmmXEnTeq+kP40ItDWzX9xAojXevjXF8Kizlnhwxxvu1w==}
+  '@slopus/happy-agent-base@0.0.22':
+    resolution: {integrity: sha512-iZlGsLPDgrRKh8GpY4ZmGUuLgiouPMllJcPFiC9Pvluk8oiiLic21eD2lDoDJvjvmQCecEvCZ/Ee/2rUAPFn8g==}
     engines: {node: '>=22.19.0'}
 
   '@slopus/happy-agent-client@0.0.1':
@@ -5170,7 +5170,7 @@ snapshots:
 
   '@slopus/ghostty-wasm@1.3.6': {}
 
-  '@slopus/happy-agent-base@0.0.21(@aws-sdk/credential-provider-node@3.972.71)(@opentelemetry/api@1.9.1)(@smithy/signature-v4@5.6.9)(@types/pg@8.15.6)(sql.js@1.14.1)(ws@8.21.1)(zod@4.4.3)':
+  '@slopus/happy-agent-base@0.0.22(@aws-sdk/credential-provider-node@3.972.71)(@opentelemetry/api@1.9.1)(@smithy/signature-v4@5.6.9)(@types/pg@8.15.6)(sql.js@1.14.1)(ws@8.21.1)(zod@4.4.3)':
     dependencies:
       '@electric-sql/pglite': 0.5.5
       '@libsql/client': 0.17.4
