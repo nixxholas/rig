@@ -347,6 +347,20 @@ describe("TitlesModule second-look claim", () => {
     });
 });
 
+describe("TitlesModule first-message claim", () => {
+    it("gives exactly one concurrent caller the durable first naming attempt", async () => {
+        const module = await started();
+
+        const claims = await Promise.all(
+            Array.from({ length: 8 }, async () => await module.claimFirstMessageNaming(ctx, "s-1")),
+        );
+
+        expect(claims.filter(Boolean)).toHaveLength(1);
+        await expect(module.claimFirstMessageNaming(ctx, "s-1")).resolves.toBe(false);
+        await expect(module.claimFirstMessageNaming(ctx, "s-2")).resolves.toBe(true);
+    });
+});
+
 describe("TitlesModule workspace naming record", () => {
     it("remembers that a workspace has taken the name of a chat, once", async () => {
         const module = await started();

@@ -89,6 +89,8 @@ export const createWorkspaceRequestSchema = Type.Object({
     mutationId: Type.Optional(mutationIdSchema),
     /** The workspace name, which is also its branch name. */
     name: Type.String(),
+    /** False when `name` is a placeholder the first chat should replace. Defaults to true. */
+    nameConfigured: Type.Optional(Type.Boolean()),
     /** The workspace to nest under: a root workspace or any workspace in a tree. */
     parentId: cuid2Schema,
 });

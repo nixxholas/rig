@@ -54,6 +54,7 @@ import {
     type TerminalEvent,
     type TerminalScope,
 } from "../terminals/index.js";
+import { TitlesModule } from "../titles/index.js";
 import { createNodeBinaryWebSocket, WebSocketDuplex } from "../transport/index.js";
 import { UsageModule, type UsageInferenceRecord } from "../usage/index.js";
 import { UserInputModule, type UserInputEvent } from "../userInput/index.js";
@@ -139,6 +140,7 @@ export class ApiModule implements AgentModule {
     readonly #fileSearch: WorkspaceFileSearchModule;
     readonly #git: GitModule;
     readonly #history: HistoryModule;
+    readonly #titles: TitlesModule;
     readonly #userInput: UserInputModule;
     readonly #usage: UsageModule;
     readonly #profile: ProfileModule;
@@ -188,6 +190,7 @@ export class ApiModule implements AgentModule {
         fileSearch: WorkspaceFileSearchModule,
         git: GitModule,
         history: HistoryModule,
+        titles: TitlesModule,
         userInput: UserInputModule,
         usage: UsageModule,
         profile: ProfileModule,
@@ -202,6 +205,7 @@ export class ApiModule implements AgentModule {
         this.#fileSearch = fileSearch;
         this.#git = git;
         this.#history = history;
+        this.#titles = titles;
         this.#userInput = userInput;
         this.#usage = usage;
         this.#profile = profile;
@@ -1669,6 +1673,7 @@ export class ApiModule implements AgentModule {
             body.mode.serviceTier === null
                 ? undefined
                 : selected.serviceTiers?.find((candidate) => candidate === body.mode.serviceTier);
+        await this.#nameFromFirstMessage(ctx, agentId, body.text, body.mode.providerId);
         const id = createId();
         const content = [{ type: "text" as const, text: body.text }, ...(body.content ?? [])];
         const options: AgentBaseMessageOptions = {
@@ -1868,6 +1873,49 @@ export class ApiModule implements AgentModule {
             current = parent;
         }
         throw new Error("The agent ancestry exceeds the supported depth.");
+    }
+
+    /** Names an untouched chat and its placeholder workspace before the real first turn starts. */
+    async #nameFromFirstMessage(
+        ctx: Context,
+        agentId: string,
+        firstMessage: string,
+        providerId: string,
+    ): Promise<void> {
+        try {
+            const [stats, pending] = await Promise.all([
+                this.#history.stats(ctx, agentId),
+                this.#history.pending(ctx, agentId),
+            ]);
+            if (stats.messages > 0 || pending.length > 0) return;
+            if (!(await this.#titles.claimFirstMessageNaming(ctx, agentId))) return;
+
+            const config = await this.#agentSystem().config(ctx, agentId);
+            if (config === undefined) return;
+            const workspaceId = await this.#workspaceIdForAgent(ctx, agentId);
+            const ownership =
+                workspaceId === undefined
+                    ? undefined
+                    : await this.#resolveWorkspaceScope(ctx, workspaceId);
+            const names = await this.#titles.nameFromFirstMessage(ctx, {
+                firstMessage,
+                providerId,
+                sessionNamed: typeof config.metadata?.title === "string",
+                ...(workspaceId === undefined || ownership === undefined
+                    ? {}
+                    : { workspace: { projectId: ownership.projectId, workspaceId } }),
+            });
+            if (names.title === undefined) return;
+            const latest = await this.#agentSystem().config(ctx, agentId);
+            if (latest === undefined || typeof latest.metadata?.title === "string") return;
+            await this.#updateAgentMetadata(ctx, agentId, { title: names.title });
+        } catch (error) {
+            ctx.log.debug(
+                "Naming a chat from its first message did not happen.",
+                { agentId },
+                error,
+            );
+        }
     }
 
     async #assertTopLevelAgent(
@@ -2279,7 +2327,7 @@ export class ApiModule implements AgentModule {
                         projectId,
                         {
                             name: body.name,
-                            nameConfigured: true,
+                            nameConfigured: body.nameConfigured ?? true,
                             parentId: body.parentId,
                             ...(body.baseRef === undefined ? {} : { baseRef: body.baseRef }),
                             ...(body.id === undefined ? {} : { id: body.id }),

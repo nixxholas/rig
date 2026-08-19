@@ -93,6 +93,7 @@ export const workspaceCreateBodySchema = Type.Object(
         baseRef: Type.Optional(Type.String({ minLength: 1, maxLength: 1_024 })),
         id: Type.Optional(apiIdSchema),
         name: Type.String({ minLength: 1, maxLength: 500 }),
+        nameConfigured: Type.Optional(Type.Boolean()),
         mutationId: Type.Optional(mutationIdSchema),
         parentId: apiIdSchema,
     },

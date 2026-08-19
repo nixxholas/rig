@@ -20,9 +20,15 @@ export function createWorkspaceTool(workspaces: WorkspacesModule, agentId: strin
         shouldReviewInAutoMode: () => false,
         execute: async (ctx, input: WorkspaceCreateToolInput, call) => {
             const { projectRef, ...request } = input;
-            const workspace = await workspaces.createWorkspace(ctx, projectRef, request, agentId, {
-                operationId: call.id,
-            });
+            const workspace = await workspaces.createWorkspace(
+                ctx,
+                projectRef,
+                { ...request, nameConfigured: true },
+                agentId,
+                {
+                    operationId: call.id,
+                },
+            );
             if (workspace === undefined) {
                 throw new Error(`Project "${projectRef}" was not found.`);
             }

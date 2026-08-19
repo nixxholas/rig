@@ -54,13 +54,15 @@ const NAMING_TIMEOUT_MS = 10_000;
  * ref are named once, because renaming either would move them out from under agents already
  * working there.
  *
- * The module remembers both of those onces — which workspaces have taken a name, and which chats
- * have had their second look — because the triggers are events and events happen again.
+ * The module remembers all three onces — which chats consumed their first-message naming, which
+ * workspaces have taken a name, and which chats have had their second look — because the triggers
+ * are events and events happen again.
  */
 export class TitlesModule implements AgentModule<AnyAgentTool> {
     readonly name = "titles";
 
     readonly #config: ConfigModule;
+    readonly #initialClaims = new Set<string>();
     readonly #workspaces: WorkspacesModule;
     #store: AgentKV | undefined;
 
@@ -243,6 +245,29 @@ export class TitlesModule implements AgentModule<AnyAgentTool> {
         await this.#refined().delete(ctx, sessionId);
     }
 
+    /**
+     * Takes the one first-message naming attempt a chat gets.
+     *
+     * This claim is never released. Once the real turn can start, moving its workspace folder or
+     * branch on a later message would move them out from under a running agent. One atomic store
+     * operation also makes concurrent sends agree which message was first.
+     */
+    async claimFirstMessageNaming(ctx: Context, sessionId: string): Promise<boolean> {
+        assertSessionId(sessionId);
+        if (this.#initialClaims.has(sessionId)) return false;
+        this.#initialClaims.add(sessionId);
+        try {
+            const attempt = createId();
+            const stored = await this.#initial().getOrCreate(ctx, sessionId, () => ({
+                at: Date.now(),
+                attempt,
+            }));
+            return Value.Check(refinementClaimSchema, stored) && stored.attempt === attempt;
+        } finally {
+            this.#initialClaims.delete(sessionId);
+        }
+    }
+
     /** Whether a workspace has already taken the name of a chat. */
     async workspaceWasNamed(ctx: Context, workspaceId: string): Promise<boolean> {
         assertWorkspaceId(workspaceId);
@@ -307,6 +332,11 @@ export class TitlesModule implements AgentModule<AnyAgentTool> {
     /** The workspaces that have taken a name, keyed by workspace. */
     #named(): AgentKV {
         return this.#requireStore().scoped("named");
+    }
+
+    /** The chats that have consumed their first-message naming, keyed by chat. */
+    #initial(): AgentKV {
+        return this.#requireStore().scoped("initial");
     }
 
     /** The chats whose second look has been claimed, keyed by chat. */
