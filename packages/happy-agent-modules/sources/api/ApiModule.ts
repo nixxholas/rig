@@ -68,11 +68,11 @@ import {
 } from "../workspaces/index.js";
 import { ApiError, invalidRequest, notFound, type ApiErrorCode } from "./ApiError.js";
 import { ApiEventJournal, type ApiEvent } from "./ApiEventJournal.js";
+import { messageResource, providerMessageContent } from "./ApiMessageProjection.js";
 import {
     agentResource,
     apiResourceVersion,
     gitResource,
-    messageResource,
     profileResource,
     projectResource,
     questionResource,
@@ -1791,7 +1791,6 @@ export class ApiModule implements AgentModule {
             ...(before === undefined ? {} : { before }),
             ...(after === undefined ? {} : { after }),
             limit,
-            omitToolData,
         });
         sendJson(response, 200, {
             runs: await Promise.all(
@@ -1805,7 +1804,9 @@ export class ApiModule implements AgentModule {
                         endedAt: run.endedAt,
                         usage: runUsage.usage,
                         costUsd: runUsage.costUsd,
-                        messages: run.messages.map((message) => messageResource(message)),
+                        messages: run.messages.map((message) =>
+                            messageResource(message, { omitToolData }),
+                        ),
                     };
                 }),
             ),
@@ -3657,70 +3658,6 @@ function statusForAgentEvent(
 
 function apiAssistantMessageId(runId: string): string {
     return `a${createHash("sha256").update(runId).digest("hex").slice(0, 24)}`;
-}
-
-function providerMessageContent(value: unknown): readonly Record<string, unknown>[] | undefined {
-    if (!Array.isArray(value)) return undefined;
-    const results = new Map<string, Record<string, unknown>>();
-    for (const candidate of value) {
-        const block = recordValue(candidate);
-        if (block?.["type"] !== "tool_result") continue;
-        const callId = stringValue(block["toolCallId"]);
-        if (callId !== undefined) results.set(callId, block);
-    }
-    return value.flatMap((candidate): Record<string, unknown>[] => {
-        const block = recordValue(candidate);
-        const type = stringValue(block?.["type"]);
-        if (block === undefined || type === undefined || type === "tool_result") return [];
-        if (type === "text") {
-            return [{ type: "text", text: stringValue(block["text"]) ?? "" }];
-        }
-        if (type === "thinking") {
-            return [
-                {
-                    type: "reasoning",
-                    text: stringValue(block["thinking"]) ?? "",
-                },
-            ];
-        }
-        if (type === "image") {
-            return [
-                {
-                    type: "image",
-                    mimeType:
-                        stringValue(block["mediaType"]) ??
-                        stringValue(block["mimeType"]) ??
-                        "application/octet-stream",
-                    data: stringValue(block["data"]) ?? "",
-                },
-            ];
-        }
-        if (type !== "toolCall") return [];
-        const callId = stringValue(block["id"]) ?? stringValue(block["callId"]) ?? "unknown";
-        const result = results.get(callId);
-        return [
-            {
-                type: "tool_call",
-                name: stringValue(block["name"]) ?? "tool",
-                status:
-                    result === undefined
-                        ? "running"
-                        : result["isError"] === true
-                          ? "failed"
-                          : "completed",
-                arguments: block["arguments"] ?? {},
-                ...(result === undefined
-                    ? {}
-                    : {
-                          result: {
-                              output:
-                                  stringValue(result["display"]) ??
-                                  JSON.stringify(result["rendered"] ?? []),
-                          },
-                      }),
-            },
-        ];
-    });
 }
 
 function resourceChanges(

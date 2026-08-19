@@ -1,0 +1,186 @@
+import { Type, type Static, type TSchema } from "@sinclair/typebox";
+import { Value } from "@sinclair/typebox/value";
+
+import {
+    MAX_HISTORY_RECORDED_TOOL_OUTPUT_LENGTH,
+    type HistoryBlock,
+    type HistoryMessage,
+} from "../history/index.js";
+import { toolCallResource, type MessageResourceOptions } from "./ApiToolPresentation.js";
+
+const providerTextBlockSchema = Type.Object(
+    { type: Type.Literal("text"), text: Type.String() },
+    { additionalProperties: true },
+);
+const providerThinkingBlockSchema = Type.Object(
+    { type: Type.Literal("thinking"), thinking: Type.String() },
+    { additionalProperties: true },
+);
+const providerImageBlockSchema = Type.Object(
+    {
+        type: Type.Literal("image"),
+        mediaType: Type.String(),
+        data: Type.Optional(Type.String()),
+    },
+    { additionalProperties: true },
+);
+const providerToolCallBlockSchema = Type.Object(
+    {
+        type: Type.Literal("toolCall"),
+        id: Type.Optional(Type.String()),
+        callId: Type.Optional(Type.String()),
+        name: Type.Optional(Type.String()),
+        arguments: Type.Optional(Type.Unknown()),
+    },
+    { additionalProperties: true },
+);
+const providerRenderedBlockSchema = Type.Union([providerTextBlockSchema, providerImageBlockSchema]);
+const providerToolResultBlockSchema = Type.Object(
+    {
+        type: Type.Literal("tool_result"),
+        toolCallId: Type.String(),
+        display: Type.Optional(Type.String()),
+        rendered: Type.Optional(Type.Array(providerRenderedBlockSchema)),
+        isError: Type.Optional(Type.Boolean()),
+    },
+    { additionalProperties: true },
+);
+const providerContentSchema = Type.Array(Type.Unknown());
+
+/** Project one durable history message into the public message shape. */
+export function messageResource(
+    message: HistoryMessage,
+    options: MessageResourceOptions = {},
+): Record<string, unknown> {
+    const role = historyRole(message.role);
+    return {
+        id: message.recordId,
+        role,
+        createdAt: message.at ?? 0,
+        content: historyBlocks(message.blocks, options),
+        ...(role === "user"
+            ? {
+                  status: "accepted",
+                  delivery: message.delivery ?? "queue",
+                  mode: message.mode ?? null,
+                  runId: message.runId ?? null,
+              }
+            : {}),
+    };
+}
+
+/** Project the live provider reducer's partial message content into the same public block shape. */
+export function providerMessageContent(
+    value: unknown,
+): readonly Record<string, unknown>[] | undefined {
+    if (!Value.Check(providerContentSchema, value)) return undefined;
+    const results = new Map<string, Static<typeof providerToolResultBlockSchema>>();
+    for (const candidate of value) {
+        const result = checked(providerToolResultBlockSchema, candidate);
+        if (result !== undefined) results.set(result.toolCallId, result);
+    }
+    return value.flatMap((candidate): Record<string, unknown>[] => {
+        const text = checked(providerTextBlockSchema, candidate);
+        if (text !== undefined) return [{ type: "text", text: text.text }];
+        const thinking = checked(providerThinkingBlockSchema, candidate);
+        if (thinking !== undefined) {
+            return [{ type: "reasoning", text: thinking.thinking }];
+        }
+        const image = checked(providerImageBlockSchema, candidate);
+        if (image !== undefined) {
+            return [
+                {
+                    type: "image",
+                    mimeType: image.mediaType,
+                    data: image.data ?? "",
+                },
+            ];
+        }
+        const call = checked(providerToolCallBlockSchema, candidate);
+        if (call === undefined) return [];
+        const callId = call.id ?? call.callId ?? "unknown";
+        const result = results.get(callId);
+        return [
+            toolCallResource(
+                {
+                    name: call.name ?? "tool",
+                    status:
+                        result === undefined
+                            ? "running"
+                            : result.isError === true
+                              ? "failed"
+                              : "completed",
+                    arguments: call.arguments ?? {},
+                    ...(result === undefined ? {} : { output: providerToolOutput(result) }),
+                },
+                {},
+            ),
+        ];
+    });
+}
+
+function historyBlocks(
+    blocks: readonly HistoryBlock[],
+    options: MessageResourceOptions,
+): readonly Record<string, unknown>[] {
+    const results = new Map<string, Extract<HistoryBlock, { type: "tool_result" }>>();
+    for (const block of blocks) {
+        if (block.type === "tool_result") results.set(block.callId, block);
+    }
+    return blocks
+        .filter((block) => block.type !== "tool_result")
+        .map((block): Record<string, unknown> => {
+            if (block.type === "text") return { type: "text", text: block.text };
+            if (block.type === "thinking") {
+                return { type: "reasoning", text: block.thinking };
+            }
+            if (block.type === "image") {
+                return {
+                    type: "image",
+                    mimeType: block.mediaType,
+                    data: block.data ?? "",
+                };
+            }
+            const result = results.get(block.callId);
+            return toolCallResource(
+                {
+                    name: block.name,
+                    status:
+                        result === undefined
+                            ? "running"
+                            : result.isError === true
+                              ? "failed"
+                              : "completed",
+                    arguments: block.arguments,
+                    ...(result === undefined ? {} : { output: result.output ?? "" }),
+                },
+                options,
+            );
+        });
+}
+
+function providerToolOutput(result: Static<typeof providerToolResultBlockSchema>): string {
+    if (result.rendered === undefined) return result.display ?? "";
+    const output = result.rendered
+        .map((block) => (block.type === "text" ? block.text : `[${block.mediaType} image output]`))
+        .join("\n");
+    if (output.length <= MAX_HISTORY_RECORDED_TOOL_OUTPUT_LENGTH) return output;
+    const suffix = `\n...[truncated ${String(
+        Math.max(0, output.length - MAX_HISTORY_RECORDED_TOOL_OUTPUT_LENGTH),
+    )} chars]`;
+    const retained = Math.max(0, MAX_HISTORY_RECORDED_TOOL_OUTPUT_LENGTH - suffix.length);
+    return `${output.slice(0, retained)}${suffix}`;
+}
+
+function checked<Schema extends TSchema>(
+    schema: Schema,
+    value: unknown,
+): Static<Schema> | undefined {
+    return Value.Check(schema, value) ? (value as Static<Schema>) : undefined;
+}
+
+function historyRole(role: HistoryMessage["role"]): string {
+    if (role === "assistant" || role === "agent") return "agent";
+    if (role === "error") return "service";
+    return role;
+}

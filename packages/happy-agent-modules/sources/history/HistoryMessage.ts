@@ -12,6 +12,8 @@ export const MAX_HISTORY_IMAGE_DATA_LENGTH = 48 * 1_024 * 1_024;
 export const MAX_HISTORY_CALL_ID_LENGTH = 256;
 export const MAX_HISTORY_TOOL_NAME_LENGTH = 256;
 export const MAX_HISTORY_TOOL_OUTPUT_LENGTH = 1_000_000;
+/** Tool output retained in an ordinary recorded tool result and its live API projection. */
+export const MAX_HISTORY_RECORDED_TOOL_OUTPUT_LENGTH = 16_000;
 export const MAX_HISTORY_TOOL_DISPLAY_LENGTH = 256_000;
 export const MAX_HISTORY_ARGUMENT_STRING_LENGTH = 1_000_000;
 export const MAX_HISTORY_ARGUMENT_KEY_LENGTH = 256;

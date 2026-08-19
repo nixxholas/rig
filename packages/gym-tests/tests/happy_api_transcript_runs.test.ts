@@ -434,6 +434,73 @@ describe("public transcript and run APIs", () => {
         });
     }, 60_000);
 
+    it("keeps tool-call presentations identical in live events and durable history", async () => {
+        let agentCall = 0;
+        const gym = await startGym({
+            inference: (request) => {
+                if (request.sessionId.startsWith("naming:")) {
+                    return {
+                        content: [
+                            {
+                                text: "<title>Tool presentation</title><slug>tool-presentation</slug>",
+                                type: "text",
+                            },
+                        ],
+                    };
+                }
+                const call = agentCall;
+                agentCall += 1;
+                return call === 0
+                    ? {
+                          content: [
+                              {
+                                  arguments: { cmd: "printf presented" },
+                                  name: "exec_command",
+                                  type: "tool_call",
+                              },
+                          ],
+                      }
+                    : { content: [{ text: "done", type: "text" }] };
+            },
+        });
+
+        const sent = await gym.send("run a presented command", {
+            id: "transcripttoolpresentation",
+            permissionMode: "full_access",
+        });
+        await waitForFinished(gym, gym.defaultSessionId, sent.runId);
+
+        const full = await gym.client.getMessages(gym.defaultSessionId);
+        const omitted = await gym.client.getMessages(gym.defaultSessionId, {
+            omitToolData: true,
+        });
+        const fullTool = toolCallFrom(full);
+        const liveTool = completedToolCallFromEvents(await gym.events(), gym.defaultSessionId);
+
+        expect(fullTool).toMatchObject({
+            type: "tool_call",
+            name: "exec_command",
+            status: "completed",
+            arguments: { cmd: "printf presented" },
+            result: { output: expect.stringContaining("presented") },
+            presentation: {
+                type: "exec_command",
+                command: "printf presented",
+                output: expect.stringContaining("presented"),
+            },
+        });
+        expect(liveTool).toEqual(fullTool);
+        expect(toolCallFrom(omitted)).toEqual({
+            type: "tool_call",
+            name: "exec_command",
+            status: "completed",
+            presentation: fullTool.presentation,
+        });
+
+        await gym.restart();
+        expect(toolCallFrom(await gym.client.getMessages(gym.defaultSessionId))).toEqual(fullTool);
+    }, 60_000);
+
     it("recovers message deltas, deletes reset content, omits tool data, and keeps compaction out of runs", async () => {
         const gym = await startGym({
             inference: [
@@ -537,13 +604,25 @@ describe("public transcript and run APIs", () => {
         });
         const fullTool = toolCallFrom(full);
         const omittedTool = toolCallFrom(omitted);
+        const liveTool = completedToolCallFromEvents(await gym.events(), gym.defaultSessionId);
         expect(fullTool).toMatchObject({
             arguments: { cmd: "printf tool-result" },
             result: { output: expect.stringContaining("tool-result") },
+            presentation: {
+                type: "exec_command",
+                command: "printf tool-result",
+                output: expect.stringContaining("tool-result"),
+            },
         });
-        expect(omittedTool).toMatchObject({ result: {} });
+        expect(liveTool).toEqual(fullTool);
+        expect(omittedTool).toEqual({
+            type: "tool_call",
+            name: "exec_command",
+            status: "completed",
+            presentation: fullTool.presentation,
+        });
         expect(omittedTool).not.toHaveProperty("arguments");
-        expect(omittedTool).not.toHaveProperty("result.output");
+        expect(omittedTool).not.toHaveProperty("result");
 
         const beforeRestart = await gym.client.getMessages(gym.defaultSessionId);
         const beforeUsage = await gym.client.getAgentUsage(gym.defaultSessionId);
@@ -666,5 +745,16 @@ function toolCallFrom(history: Awaited<ReturnType<AgentGym["client"]["getMessage
             if (tool !== undefined) return tool;
         }
     }
-    throw new Error("The history contained no tool call.");
+    throw new Error(`The history contained no tool call: ${JSON.stringify(history)}`);
+}
+
+function completedToolCallFromEvents(events: readonly GymAgentEvent[], agentId: string) {
+    for (const event of events.toReversed()) {
+        if (event.type !== "message.updated" || event.payload.agentId !== agentId) continue;
+        const tool = event.payload.message.content.find(
+            (block) => block.type === "tool_call" && block.status === "completed",
+        );
+        if (tool !== undefined) return tool;
+    }
+    throw new Error("The event stream contained no completed tool call.");
 }

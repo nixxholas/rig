@@ -4,7 +4,6 @@ import type { AgentConfig, AgentSystemRef } from "@slopus/happy-agent-base";
 import type { Context } from "@steve.kite/stdlib";
 
 import type { GitChangeSnapshot } from "../git/index.js";
-import type { HistoryBlock, HistoryMessage } from "../history/index.js";
 import type { Profile } from "../profile/index.js";
 import { ProjectsModule, type Project, type ProjectSettings } from "../projects/index.js";
 import type { Terminal } from "../terminals/index.js";
@@ -230,24 +229,6 @@ export function gitResource(snapshot: GitChangeSnapshot): Record<string, unknown
     };
 }
 
-export function messageResource(message: HistoryMessage): Record<string, unknown> {
-    const role = historyRole(message.role);
-    return {
-        id: message.recordId,
-        role,
-        createdAt: message.at ?? 0,
-        content: historyBlocks(message.blocks),
-        ...(role === "user"
-            ? {
-                  status: "accepted",
-                  delivery: message.delivery ?? "queue",
-                  mode: message.mode ?? null,
-                  runId: message.runId ?? null,
-              }
-            : {}),
-    };
-}
-
 export function questionResource(
     request: UserInputRequest,
     runId: string | undefined,
@@ -371,50 +352,6 @@ function workspaceInitializationStatus(status: Workspace["status"]): string {
     if (status === "initializing") return "initializing";
     if (status === "failed") return "failed";
     return "ready";
-}
-
-function historyRole(role: HistoryMessage["role"]): string {
-    if (role === "assistant" || role === "agent") return "agent";
-    if (role === "error") return "service";
-    return role;
-}
-
-function historyBlocks(blocks: readonly HistoryBlock[]): readonly Record<string, unknown>[] {
-    const calls = new Map<string, Extract<HistoryBlock, { type: "tool_call" }>>();
-    for (const block of blocks) {
-        if (block.type === "tool_call") calls.set(block.callId, block);
-    }
-    return blocks
-        .filter((block) => block.type !== "tool_result")
-        .map((block): Record<string, unknown> => {
-            if (block.type === "text") return { type: "text", text: block.text };
-            if (block.type === "thinking") {
-                return { type: "reasoning", text: block.thinking };
-            }
-            if (block.type === "image") {
-                return {
-                    type: "image",
-                    mimeType: block.mediaType,
-                    data: block.data ?? "",
-                };
-            }
-            const result = blocks.find(
-                (candidate) =>
-                    candidate.type === "tool_result" && candidate.callId === block.callId,
-            );
-            return {
-                type: "tool_call",
-                name: block.name,
-                status:
-                    result?.type === "tool_result"
-                        ? result.isError === true
-                            ? "failed"
-                            : "completed"
-                        : "running",
-                arguments: block.arguments,
-                ...(result?.type === "tool_result" ? { result: { output: result.output } } : {}),
-            };
-        });
 }
 
 function questionAnswers(request: UserInputRequest): Record<string, readonly string[]> | null {

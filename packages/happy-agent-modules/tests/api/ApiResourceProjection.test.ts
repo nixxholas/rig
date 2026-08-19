@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 
 import { eventIdSchema } from "../../sources/events/index.js";
 import { apiResourceVersion } from "../../sources/api/ApiResourceProjection.js";
+import { messageResource, providerMessageContent } from "../../sources/api/ApiMessageProjection.js";
+import { toolCallResource } from "../../sources/api/ApiToolPresentation.js";
 
 describe("apiResourceVersion", () => {
     it("projects a numeric module version into a deterministic ordered UUIDv7", () => {
@@ -17,5 +19,174 @@ describe("apiResourceVersion", () => {
 
     it("keeps resource identities distinct at the same timestamp and counter", () => {
         expect(apiResourceVersion(1, 1, "a")).not.toBe(apiResourceVersion(1, 1, "b"));
+    });
+});
+
+describe("messageResource", () => {
+    it("projects a completed command with the same display-ready tool presentation", () => {
+        expect(
+            messageResource({
+                at: 100,
+                blocks: [
+                    {
+                        type: "tool_call",
+                        callId: "call-a",
+                        name: "exec_command",
+                        arguments: { cmd: "pnpm test" },
+                    },
+                    {
+                        type: "tool_result",
+                        callId: "call-a",
+                        toolName: "exec_command",
+                        display: "Tool exec_command returned 9 characters.",
+                        output: "42 passed",
+                    },
+                ],
+                recordId: "message-a",
+                role: "assistant",
+            }),
+        ).toEqual({
+            id: "message-a",
+            role: "agent",
+            createdAt: 100,
+            content: [
+                {
+                    type: "tool_call",
+                    name: "exec_command",
+                    status: "completed",
+                    arguments: { cmd: "pnpm test" },
+                    result: { output: "42 passed" },
+                    presentation: {
+                        type: "exec_command",
+                        command: "pnpm test",
+                        output: "42 passed",
+                    },
+                },
+            ],
+        });
+    });
+
+    it("uses exactly the same completed tool-call shape for events and history", () => {
+        const historical = messageResource({
+            at: 100,
+            blocks: [
+                {
+                    type: "tool_call",
+                    callId: "call-a",
+                    name: "exec_command",
+                    arguments: { cmd: "pnpm test" },
+                },
+                {
+                    type: "tool_result",
+                    callId: "call-a",
+                    toolName: "exec_command",
+                    display: "Tool exec_command returned 9 characters.",
+                    output: "42 passed",
+                },
+            ],
+            recordId: "message-a",
+            role: "assistant",
+        });
+        const live = providerMessageContent([
+            {
+                type: "toolCall",
+                id: "call-a",
+                name: "exec_command",
+                arguments: { cmd: "pnpm test" },
+            },
+            {
+                type: "tool_result",
+                toolCallId: "call-a",
+                toolName: "exec_command",
+                display: "Tool exec_command returned 9 characters.",
+                rendered: [{ type: "text", text: "42 passed" }],
+            },
+        ]);
+
+        expect(live).toEqual(historical.content);
+    });
+
+    it("omits raw data only after projecting a presentation", () => {
+        const message = messageResource(
+            {
+                at: 100,
+                blocks: [
+                    {
+                        type: "tool_call",
+                        callId: "call-a",
+                        name: "exec_command",
+                        arguments: { cmd: "pnpm test" },
+                    },
+                    {
+                        type: "tool_result",
+                        callId: "call-a",
+                        toolName: "exec_command",
+                        output: "42 passed",
+                    },
+                    {
+                        type: "tool_call",
+                        callId: "call-b",
+                        name: "custom_tool",
+                        arguments: { secret: "still needed to render" },
+                    },
+                    {
+                        type: "tool_result",
+                        callId: "call-b",
+                        toolName: "custom_tool",
+                        output: "custom output",
+                    },
+                ],
+                recordId: "message-a",
+                role: "assistant",
+            },
+            { omitToolData: true },
+        );
+
+        expect(message.content).toEqual([
+            {
+                type: "tool_call",
+                name: "exec_command",
+                status: "completed",
+                presentation: {
+                    type: "exec_command",
+                    command: "pnpm test",
+                    output: "42 passed",
+                },
+            },
+            {
+                type: "tool_call",
+                name: "custom_tool",
+                status: "completed",
+                arguments: { secret: "still needed to render" },
+                result: { output: "custom output" },
+            },
+        ]);
+    });
+});
+
+describe("toolCallResource", () => {
+    it("projects fixed vendor exploration and search tools", () => {
+        expect(
+            toolCallResource({
+                name: "Read",
+                status: "running",
+                arguments: { file_path: "/workspace/auth.ts" },
+            }),
+        ).toMatchObject({
+            presentation: {
+                type: "exploration",
+                operations: [{ kind: "read", name: "/workspace/auth.ts" }],
+            },
+        });
+        expect(
+            toolCallResource({
+                name: "grok_x_search",
+                status: "completed",
+                arguments: { query: "Rig launch" },
+                output: "Answer",
+            }),
+        ).toMatchObject({
+            presentation: { type: "search", target: "x", query: "Rig launch" },
+        });
     });
 });

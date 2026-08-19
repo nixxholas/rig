@@ -16,11 +16,12 @@ export {
     type ApiEventPage,
 } from "./ApiEventJournal.js";
 export { ApiModule } from "./ApiModule.js";
+export { messageResource } from "./ApiMessageProjection.js";
+export { type MessageResourceOptions } from "./ApiToolPresentation.js";
 export {
     apiResourceVersion,
     agentResource,
     gitResource,
-    messageResource,
     profileResource,
     projectResource,
     projectResourceWithSettings,

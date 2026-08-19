@@ -5,95 +5,143 @@
  * and events all speak it.
  */
 
-import type { Cuid2, EventCursor, MessageMode, Timestamp } from "./common.js";
+import { type Static, Type } from "@sinclair/typebox";
+
+import {
+    cuid2Schema,
+    Nullable,
+    type Cuid2,
+    type EventCursor,
+    type MessageMode,
+    type Timestamp,
+} from "./common.js";
 import type { UsageBreakdown } from "./usage.js";
 
-/** A tool call rendered for display, from a closed set every client implements once. */
-export type ToolPresentation =
-    | ExplorationPresentation
-    | ExecCommandPresentation
-    | BackgroundTerminalInteractionPresentation
-    | FileDiffPresentation
-    | SearchPresentation;
-
-/** Reading around the codebase: listings, file reads, and searches. */
-export interface ExplorationPresentation {
-    type: "exploration";
-    operations: ExplorationOperation[];
-}
+/** One read the exploration performed: a listing, a file read, or a search. */
+export const explorationOperationSchema = Type.Union([
+    Type.Object({ kind: Type.Literal("list"), target: Type.String() }),
+    Type.Object({ kind: Type.Literal("read"), name: Type.String() }),
+    Type.Object({
+        command: Type.String(),
+        kind: Type.Literal("search"),
+        path: Type.Optional(Type.String()),
+        query: Type.Optional(Type.String()),
+    }),
+]);
 
 /** One read the exploration performed: a listing, a file read, or a search. */
-export type ExplorationOperation =
-    | { kind: "list"; target: string }
-    | { kind: "read"; name: string }
-    | { kind: "search"; command: string; query?: string; path?: string };
+export type ExplorationOperation = Static<typeof explorationOperationSchema>;
+
+/** Reading around the codebase: listings, file reads, and searches. */
+export const explorationPresentationSchema = Type.Object({
+    operations: Type.Array(explorationOperationSchema),
+    type: Type.Literal("exploration"),
+});
+
+/** Reading around the codebase: listings, file reads, and searches. */
+export type ExplorationPresentation = Static<typeof explorationPresentationSchema>;
 
 /** A shell command; `output` arrives on completion. */
-export interface ExecCommandPresentation {
-    type: "exec_command";
-    command: string;
-    output?: string | null;
+export const execCommandPresentationSchema = Type.Object({
+    command: Type.String(),
+    output: Type.Optional(Nullable(Type.String())),
     /** Set when the command kept running and became a background terminal. */
-    terminalId?: Cuid2 | null;
-}
+    terminalId: Type.Optional(Nullable(cuid2Schema)),
+    type: Type.Literal("exec_command"),
+});
+
+/** A shell command; `output` arrives on completion. */
+export type ExecCommandPresentation = Static<typeof execCommandPresentationSchema>;
 
 /** Input typed into an existing background terminal. */
-export interface BackgroundTerminalInteractionPresentation {
-    type: "background_terminal_interaction";
-    terminalId: Cuid2;
+export const backgroundTerminalInteractionPresentationSchema = Type.Object({
     /** What the terminal is running. */
-    command: string;
+    command: Type.String(),
     /** What was typed into it. */
-    input: string;
-}
+    input: Type.String(),
+    terminalId: cuid2Schema,
+    type: Type.Literal("background_terminal_interaction"),
+});
 
-/** File changes, one or many files per call. */
-export interface FileDiffPresentation {
-    type: "file_diff";
-    files: FileDiff[];
-    /** How many files the call changed but the presentation left out. */
-    omittedFiles?: number;
-}
-
-/** One file's changes inside a diff presentation. */
-export interface FileDiff {
-    path: string;
-    kind: "add" | "delete" | "update";
-    /** For syntax highlighting, when the daemon could name the language. */
-    language?: string;
-    added: number;
-    deleted: number;
-    /** How many lines this file's hunks left out. */
-    omittedLines?: number;
-    hunks: FileDiffHunk[];
-}
-
-/** A contiguous run of diff lines, numbered against both sides. */
-export interface FileDiffHunk {
-    oldStart: number;
-    newStart: number;
-    lines: FileDiffLine[];
-}
+/** Input typed into an existing background terminal. */
+export type BackgroundTerminalInteractionPresentation = Static<
+    typeof backgroundTerminalInteractionPresentationSchema
+>;
 
 /** One line of a hunk. */
-export interface FileDiffLine {
-    kind: "context" | "add" | "delete";
-    text: string;
-}
+export const fileDiffLineSchema = Type.Object({
+    kind: Type.Union([Type.Literal("context"), Type.Literal("add"), Type.Literal("delete")]),
+    text: Type.String(),
+});
 
-/** A web or X search; `sources` arrives on completion. */
-export interface SearchPresentation {
-    type: "search";
-    target: "web" | "x";
-    query: string;
-    sources?: SearchSource[];
-}
+/** One line of a hunk. */
+export type FileDiffLine = Static<typeof fileDiffLineSchema>;
+
+/** A contiguous run of diff lines, numbered against both sides. */
+export const fileDiffHunkSchema = Type.Object({
+    lines: Type.Array(fileDiffLineSchema),
+    newStart: Type.Integer({ minimum: 0 }),
+    oldStart: Type.Integer({ minimum: 0 }),
+});
+
+/** A contiguous run of diff lines, numbered against both sides. */
+export type FileDiffHunk = Static<typeof fileDiffHunkSchema>;
+
+/** One file's changes inside a diff presentation. */
+export const fileDiffSchema = Type.Object({
+    added: Type.Integer({ minimum: 0 }),
+    deleted: Type.Integer({ minimum: 0 }),
+    hunks: Type.Array(fileDiffHunkSchema),
+    kind: Type.Union([Type.Literal("add"), Type.Literal("delete"), Type.Literal("update")]),
+    /** For syntax highlighting, when the daemon could name the language. */
+    language: Type.Optional(Type.String()),
+    /** How many lines this file's hunks left out. */
+    omittedLines: Type.Optional(Type.Integer({ minimum: 0 })),
+    path: Type.String(),
+});
+
+/** One file's changes inside a diff presentation. */
+export type FileDiff = Static<typeof fileDiffSchema>;
+
+/** File changes, one or many files per call. */
+export const fileDiffPresentationSchema = Type.Object({
+    files: Type.Array(fileDiffSchema),
+    /** How many files the call changed but the presentation left out. */
+    omittedFiles: Type.Optional(Type.Integer({ minimum: 0 })),
+    type: Type.Literal("file_diff"),
+});
+
+/** File changes, one or many files per call. */
+export type FileDiffPresentation = Static<typeof fileDiffPresentationSchema>;
 
 /** One source a search drew from. */
-export interface SearchSource {
-    url: string;
-    title: string;
-}
+export const searchSourceSchema = Type.Object({ title: Type.String(), url: Type.String() });
+
+/** One source a search drew from. */
+export type SearchSource = Static<typeof searchSourceSchema>;
+
+/** A web or X search; `sources` arrives on completion. */
+export const searchPresentationSchema = Type.Object({
+    query: Type.String(),
+    sources: Type.Optional(Type.Array(searchSourceSchema)),
+    target: Type.Union([Type.Literal("web"), Type.Literal("x")]),
+    type: Type.Literal("search"),
+});
+
+/** A web or X search; `sources` arrives on completion. */
+export type SearchPresentation = Static<typeof searchPresentationSchema>;
+
+/** Every display-ready tool-call presentation the client understands. */
+export const toolPresentationSchema = Type.Union([
+    explorationPresentationSchema,
+    execCommandPresentationSchema,
+    backgroundTerminalInteractionPresentationSchema,
+    fileDiffPresentationSchema,
+    searchPresentationSchema,
+]);
+
+/** Every display-ready tool-call presentation the client understands. */
+export type ToolPresentation = Static<typeof toolPresentationSchema>;
 
 /** What is in a message, in order. */
 export type MessageBlock = TextBlock | ImageBlock | ReasoningBlock | ToolCallBlock;

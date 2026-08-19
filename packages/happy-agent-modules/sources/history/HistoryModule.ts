@@ -43,6 +43,7 @@ import {
     MAX_HISTORY_PAGE_SIZE,
     MAX_HISTORY_PENDING_BLOCKS,
     MAX_HISTORY_POSITION,
+    MAX_HISTORY_RECORDED_TOOL_OUTPUT_LENGTH,
     MAX_HISTORY_TOTAL_MESSAGES,
     historyToolArgumentsSchema,
     historyToolCallBlockSchema,
@@ -109,8 +110,6 @@ const happyMessageMetadataSchema = Type.Object(
 type HappyMessageMetadata = Static<typeof happyMessageMetadataSchema>;
 const DEFAULT_READER_LIMIT = 200;
 const positiveIntegerSchema = Type.Integer({ minimum: 1 });
-/** How much tool output is recorded before the rest is dropped as not worth keeping. */
-const TOOL_OUTPUT_LIMIT = 16_000;
 /** How many records one end of a two-ended excerpt may contribute. */
 const EXCERPT_END_PAGE_SIZE = 100;
 /** The most characters one excerpt may be asked to render into. */
@@ -641,7 +640,7 @@ export class HistoryModule implements AgentModule {
     ): Promise<void> {
         const storedName = await scope.runKV.read(ctx, TOOL_NAME_KEY);
         const toolName = typeof storedName === "string" ? storedName : "unknown tool";
-        const output = renderOutput(result.content, TOOL_OUTPUT_LIMIT);
+        const output = renderOutput(result.content, MAX_HISTORY_RECORDED_TOOL_OUTPUT_LENGTH);
         const toolResultBlock: HistoryBlock = {
             type: "tool_result",
             callId: result.callId,

@@ -1415,31 +1415,14 @@ one shape carries the whole conversation; history, send acceptances, and events 
 ```json
 {
     "type": "tool_call",
-    "name": "Edit",
+    "name": "exec_command",
     "status": "completed",
-    "arguments": { "file_path": "sources/auth/login.ts", "old_string": "...", "new_string": "..." },
-    "result": { "output": "..." },
+    "arguments": { "cmd": "pnpm test" },
+    "result": { "output": "42 passed" },
     "presentation": {
-        "type": "file_diff",
-        "files": [
-            {
-                "path": "sources/auth/login.ts",
-                "kind": "update",
-                "added": 1,
-                "deleted": 1,
-                "hunks": [
-                    {
-                        "oldStart": 12,
-                        "newStart": 12,
-                        "lines": [
-                            { "kind": "context", "text": "function callback(url) {" },
-                            { "kind": "delete", "text": "  redirect(url)" },
-                            { "kind": "add", "text": "  redirect(safe(url))" }
-                        ]
-                    }
-                ]
-            }
-        ]
+        "type": "exec_command",
+        "command": "pnpm test",
+        "output": "42 passed"
     }
 }
 ```
@@ -1452,11 +1435,10 @@ recognize.
 
 #### Presentation
 
-Raw tool arguments are a poor thing to render: every tool has its own schema, and a client that
-wants to draw "edited `login.ts`" with a diff should not need to understand every tool ever
-added. A tool call therefore carries an optional `presentation`: a **typed** rendering of what
-the call did, from a closed set of presentation types every client implements once. Vendors
-differ in tool names and schemas; presentations are where they converge.
+Raw tool arguments are a poor thing to render: every tool has its own schema, and clients should
+not need vendor-specific rendering logic. A supported tool call therefore carries an optional
+`presentation`: a **typed** rendering of what the call did. Vendors differ in tool names and
+schemas; presentations are where their display shape converges.
 
 A presentation describes the call while it runs and absorbs the outcome when it finishes — a
 running `exec_command` has its `command`, and gains its `output` on completion. A block without
@@ -1464,95 +1446,55 @@ a `presentation` is rendered from its raw `arguments` and `result`; a block with
 rendered without ever reading them, which is what makes `omitToolData` on history loads
 possible.
 
-The presentation types:
+The daemon uses the same tool-call projection for live `message.updated` events and
+`GET /v0/agents/:agentId/messages`. At the same lifecycle state, the complete `tool_call` block —
+including `status`, raw data, and `presentation` — is identical on both paths and remains so after
+a daemon restart. `omitToolData` is applied only after this shared projection.
 
-**`exploration`** — reading around the codebase: listings, file reads, and searches, possibly
-several per call.
+The daemon currently emits three presentation types from these exact tool names when their
+expected arguments are present:
+
+| Presentation   | Tool calls                                                                                                             |
+| -------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `exploration`  | `Read`, `read_file`, `view_image`, `list_dir`, `Glob`, `Grep`, `grep`                                                  |
+| `exec_command` | `exec_command`, `Bash`, `run_terminal_command`                                                                         |
+| `search`       | `bedrock_web_search`, `claude_web_search`, `codex_web_search`, `gemini_web_search`, `grok_web_search`, `grok_x_search` |
+
+**`exploration`** — one normalized directory listing, file read, or code search. The daemon
+currently emits one operation per mapped tool call.
 
 ```json
 {
     "type": "exploration",
-    "operations": [
-        { "kind": "list", "target": "sources/auth" },
-        { "kind": "read", "name": "sources/auth/login.ts" },
-        { "kind": "search", "command": "grep -rn redirect", "query": "redirect", "path": "sources" }
-    ]
+    "operations": [{ "kind": "read", "name": "sources/auth/login.ts" }]
 }
 ```
 
 Each operation is `{ "kind": "list", "target" }`, `{ "kind": "read", "name" }`, or
 `{ "kind": "search", "command", "query"?, "path"? }`.
 
-**`exec_command`** — a shell command. While running, only `command`; on completion, the
-captured `output`, and a `terminalId` when the command kept running and became a background
-terminal.
+**`exec_command`** — a shell command. While running it carries only `command`; on completion it
+also carries the same bounded `output` as the raw result.
 
 ```json
-{ "type": "exec_command", "command": "pnpm test", "output": "42 passed", "terminalId": null }
+{ "type": "exec_command", "command": "pnpm test", "output": "42 passed" }
 ```
 
-**`background_terminal_interaction`** — input typed into an existing background terminal.
-
-```json
-{
-    "type": "background_terminal_interaction",
-    "terminalId": "t5f6g7h8",
-    "command": "pnpm dev",
-    "input": "y\n"
-}
-```
-
-`command` is what the terminal is running, `input` is what was typed into it.
-
-**`file_diff`** — file changes, one or many files per call.
-
-```json
-{
-    "type": "file_diff",
-    "files": [
-        {
-            "path": "sources/auth/login.ts",
-            "kind": "update",
-            "language": "typescript",
-            "added": 1,
-            "deleted": 1,
-            "omittedLines": 0,
-            "hunks": [
-                {
-                    "oldStart": 12,
-                    "newStart": 12,
-                    "lines": [
-                        { "kind": "context", "text": "..." },
-                        { "kind": "delete", "text": "..." },
-                        { "kind": "add", "text": "..." }
-                    ]
-                }
-            ]
-        }
-    ],
-    "omittedFiles": 0
-}
-```
-
-Per file: `path`, a `kind` of `"add"`, `"delete"`, or `"update"`, optional `language` for
-highlighting, `added`/`deleted` line counts, and `hunks` of numbered lines whose `kind` is
-`"context"`, `"add"`, or `"delete"`. Oversized diffs truncate honestly: `omittedLines` per
-file, `omittedFiles` per call.
-
-**`search`** — a web or X search. While running, the `query` and `target`; on completion, the
-`sources` it drew from.
+**`search`** — a web or X search, carrying the normalized `query` and a `target` of `"web"` or
+`"x"`.
 
 ```json
 {
     "type": "search",
     "target": "web",
-    "query": "thumbhash spec",
-    "sources": [{ "url": "https://evanw.github.io/thumbhash/", "title": "ThumbHash" }]
+    "query": "thumbhash spec"
 }
 ```
 
-The presentation set will grow; a client that meets an unknown presentation type falls back to
-rendering the block's raw data, exactly as if the presentation were absent.
+Other calls, including file-edit and background-terminal-input calls, currently carry no
+presentation and keep their raw data. The presentation set may grow; a client that meets an
+unknown presentation type falls back to rendering the block's raw data, exactly as if the
+presentation were absent.
 
 ### `POST /v0/agents/:agentId/send`
 
@@ -1706,7 +1648,12 @@ Response — `200`:
                             "name": "Bash",
                             "arguments": { "command": "grep -rn redirect sources/auth" },
                             "status": "completed",
-                            "result": { "output": "..." }
+                            "result": { "output": "..." },
+                            "presentation": {
+                                "type": "exec_command",
+                                "command": "grep -rn redirect sources/auth",
+                                "output": "..."
+                            }
                         },
                         { "type": "text", "text": "Found it — the callback URL rewrites..." }
                     ]

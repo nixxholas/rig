@@ -16,3 +16,7 @@ client never dials a socket itself or reads credentials from disk.
 
 Protocol shapes live in `sources/protocol/`, one file per API chapter, with shared wire
 values declared as TypeBox schemas and their TypeScript types derived with `Static`.
+
+Tool calls expose the complete `ToolPresentation` discriminated union — exploration, command,
+background-terminal interaction, file diff, and web/X search — together with an exported TypeBox
+schema for each variant and `toolPresentationSchema` for the whole set.

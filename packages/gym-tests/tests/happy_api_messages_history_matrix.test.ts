@@ -376,20 +376,34 @@ describe("public message and history matrix", () => {
     });
 
     it("MH-16 returns tool data by default and omits raw fields on request", async () => {
+        let agentCall = 0;
         const gym = await startGym({
-            inference: [
-                {
-                    content: [
-                        {
-                            arguments: { cmd: "printf matrix-tool" },
-                            callId: "mh-16-tool",
-                            name: "exec_command",
-                            type: "tool_call",
-                        },
-                    ],
-                },
-                { content: [{ text: "tool complete", type: "text" }] },
-            ],
+            inference: (request) => {
+                if (request.sessionId.startsWith("naming:")) {
+                    return {
+                        content: [
+                            {
+                                text: "<title>Matrix tool</title><slug>matrix-tool</slug>",
+                                type: "text",
+                            },
+                        ],
+                    };
+                }
+                const call = agentCall;
+                agentCall += 1;
+                return call === 0
+                    ? {
+                          content: [
+                              {
+                                  arguments: { cmd: "printf matrix-tool" },
+                                  callId: "mh-16-tool",
+                                  name: "exec_command",
+                                  type: "tool_call",
+                              },
+                          ],
+                      }
+                    : { content: [{ text: "tool complete", type: "text" }] };
+            },
         });
         await gym.send("run the tool", { permissionMode: "full_access" });
         const full = await gym.client.getMessages(gym.defaultSessionId);
@@ -401,10 +415,20 @@ describe("public message and history matrix", () => {
         expect(fullTool).toMatchObject({
             arguments: { cmd: "printf matrix-tool" },
             result: { output: expect.stringContaining("matrix-tool") },
+            presentation: {
+                type: "exec_command",
+                command: "printf matrix-tool",
+                output: expect.stringContaining("matrix-tool"),
+            },
         });
-        expect(omittedTool).toMatchObject({ result: {} });
+        expect(omittedTool).toEqual({
+            type: "tool_call",
+            name: "exec_command",
+            status: "completed",
+            presentation: fullTool.presentation,
+        });
         expect(omittedTool).not.toHaveProperty("arguments");
-        expect(omittedTool).not.toHaveProperty("result.output");
+        expect(omittedTool).not.toHaveProperty("result");
     }, 30_000);
 
     it("MH-17 records a provider failure as a failed run without losing the user message", async () => {

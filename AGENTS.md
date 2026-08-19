@@ -167,6 +167,20 @@ copies of every class, so `instanceof` fails across the seam and errors thrown b
 recognized by the other. When a dependency must be upgraded, upgrade it in every package that
 declares it, in the same change.
 
+## Happy Agent API release flow
+
+When changing the Happy Agent API, use this sequence:
+
+1. Finish the API and client changes, then sync them to `main`.
+2. Release `@slopus/happy-agent-client` from `main`.
+3. Update every package that depends on `@slopus/happy-agent-client` to the newly published exact
+   version, and update the lockfile in the same change.
+4. Fix and run the tests and typechecks against that published client version.
+5. Sync the dependency and test fixes to `main` again.
+
+Do not point consumers at an unpublished client version or combine the first API sync with the
+post-release dependency upgrade.
+
 ## Runtime validation
 
 Use TypeBox schemas for every runtime type validation. Derive TypeScript types from those schemas
