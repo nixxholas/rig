@@ -35,9 +35,10 @@ folder that already is the home project still converges on that row.
 
 A project is a folder, so requiring every explicitly registered folder to be a Git repository
 rejected the plain-directory workflow the workspace model already supports. Registration now
-accepts a readable ordinary directory while still rejecting a subdirectory inside a Git working
-tree. Setup durably records Git as absent, marks worktrees unsupported with a human reason, and the
-workspaces module consequently creates copied child folders without another compatibility path.
+accepts any readable directory, including a subdirectory inside a larger Git working tree. Setup
+durably records whether that exact folder supports worktrees and, when it does not, the workspaces
+module creates copied child folders. The folder the person selected remains the project boundary;
+an ancestor repository must not silently widen it.
 
 ## Looking at a folder is not always needed
 

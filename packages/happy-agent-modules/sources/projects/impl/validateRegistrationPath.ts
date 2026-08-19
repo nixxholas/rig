@@ -8,9 +8,9 @@ import { ProjectRegistrationError } from "../ProjectRegistrationError.js";
 /**
  * Checks a folder someone asked to register explicitly.
  *
- * Registration is deliberate, so it is held to a stricter standard than the folder a session
- * happens to start in. A Git folder must be the canonical root of its working tree; a readable
- * ordinary directory is also a project, and its workspaces are copied directories.
+ * Any readable directory is a project, whether it is an ordinary folder, a Git repository root,
+ * or a subdirectory inside a larger Git working tree. Git inspection decides separately whether
+ * child workspaces can use worktrees or must be copied directories.
  */
 export async function validateRegistrationPath(
     git: Pick<GitModule, "normalizeProjectCwd" | "topLevel">,
@@ -58,9 +58,8 @@ export async function validateRegistrationPath(
             );
         }
     }
-    let topLevel: string;
     try {
-        topLevel = await git.topLevel(path);
+        await git.topLevel(path);
     } catch (error) {
         if (isInaccessiblePathError(error)) {
             throw new ProjectRegistrationError(
@@ -71,12 +70,6 @@ export async function validateRegistrationPath(
         // A readable ordinary folder is a complete project. Git inspection later persists the
         // explicit unsupported-worktree reason that makes workspace creation choose a copy.
         return path;
-    }
-    if (topLevel !== path) {
-        throw new ProjectRegistrationError(
-            "not_git_top_level",
-            "Choose the Git repository's top-level folder.",
-        );
     }
     return path;
 }

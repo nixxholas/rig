@@ -86,17 +86,27 @@ describe("plain-directory project registration", () => {
         }
     });
 
-    it("still rejects a Git subdirectory because only the repository root is a project", async () => {
+    it("accepts a Git subdirectory as its own project folder", async () => {
         const repository = await createRepository();
         const subdirectory = join(repository, "packages", "child");
         await mkdir(subdirectory, { recursive: true });
         const root = await mkdtemp(join(tmpdir(), "git-subdirectory-registration-"));
         const world = await createWorld(root, "git-subdirectory");
         try {
-            await expect(
-                world.projects.register(world.database.context, { path: subdirectory }),
-            ).rejects.toMatchObject({
-                code: "not_git_top_level",
+            const registered = await world.projects.register(world.database.context, {
+                path: subdirectory,
+            });
+            const ready = await waitForProject(
+                world.projects,
+                world.database.context,
+                registered.id,
+            );
+            expect(ready).toMatchObject({
+                initializationStatus: "ready",
+                repositoryRef: world.git.normalizeProjectCwd(subdirectory),
+                worktreeSupport: "unsupported",
+                worktreeUnsupportedReason:
+                    "This folder is inside a Git repository but is not its root.",
             });
         } finally {
             await world.close();

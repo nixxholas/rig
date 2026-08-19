@@ -475,7 +475,7 @@ describe("projects at the public Happy Agent API", () => {
     );
 
     it(
-        "reports missing, non-directory, Git-subdirectory, and initialization failures",
+        "reports invalid paths and initialization failures while accepting Git subdirectories",
         { timeout: 90_000 },
         async () => {
             const gym = await freshGym();
@@ -498,15 +498,11 @@ describe("projects at the public Happy Agent API", () => {
             await execFileAsync("git", ["init", "--quiet", repository]);
             const nested = join(repository, "nested");
             await mkdir(nested, { recursive: true });
-            if (process.platform === "darwin") {
-                const reserved = (await gym.client.registerProject({ path: nested })).project;
-                expect(reserved.initialization.status).toBe("initializing");
-            } else {
-                await expect(gym.client.registerProject({ path: nested })).rejects.toMatchObject({
-                    code: "invalid_request",
-                    status: 400,
-                });
-            }
+            const nestedProject = (await gym.client.registerProject({ path: nested })).project;
+            expect(nestedProject.initialization.status).toBe("initializing");
+            const nestedReady = await waitForReadyProject(gym, nestedProject.id);
+            expect(nestedReady.compute).toEqual({ path: nested, type: "host" });
+            expect(nestedReady.worktreeSupport).toBe("unsupported");
 
             const vanishingPath = join(gym.workspacePath, "projects", "vanishing");
             await mkdir(vanishingPath, { recursive: true });
