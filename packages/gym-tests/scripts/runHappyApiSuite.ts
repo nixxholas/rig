@@ -21,6 +21,8 @@ interface AssertionResult {
 }
 
 interface VitestReport {
+    readonly success?: boolean;
+    readonly numFailedTestSuites?: number;
     readonly numTotalTests?: number;
     readonly numPassedTests?: number;
     readonly numFailedTests?: number;
@@ -37,6 +39,7 @@ interface VitestReport {
 
 interface CommandResult {
     readonly exitCode: number;
+    readonly signal: NodeJS.Signals | null;
     readonly stdout: string;
     readonly stderr: string;
 }
@@ -74,6 +77,7 @@ const runResult = await runCommand(
         "run",
         "--maxWorkers=1",
         "--retry=0",
+        "--reporter=default",
         "--reporter=json",
         "--reporter=hanging-process",
         `--outputFile.json=${reportPath}`,
@@ -148,6 +152,12 @@ if (passedAssertions.length !== listed.length || report.numPassedTests !== liste
 if (failedAssertions.length > 0) {
     failures.push(`${String(failedAssertions.length)} API scenarios failed.`);
 }
+if (report.success !== true || (report.numFailedTestSuites ?? 0) > 0) {
+    failures.push(
+        `Vitest reported success=${String(report.success ?? "unknown")} and ` +
+            `${String(report.numFailedTestSuites ?? "unknown")} failed test suites.`,
+    );
+}
 if (pendingAssertions.length > 0 || (report.numPendingTests ?? 0) > 0) {
     failures.push(
         `${String(Math.max(pendingAssertions.length, report.numPendingTests ?? 0))} API scenarios skipped/pending.`,
@@ -161,7 +171,10 @@ if (todoAssertions.length > 0 || (report.numTodoTests ?? 0) > 0) {
 if (retryCount > 0) failures.push(`${String(retryCount)} retries were reported.`);
 if (unhandledCount > 0) failures.push(`${String(unhandledCount)} unhandled errors were reported.`);
 if (runResult.exitCode !== 0 && failures.length === 0) {
-    failures.push(`Vitest exited with code ${String(runResult.exitCode)}.`);
+    failures.push(
+        `Vitest exited with code ${String(runResult.exitCode)}` +
+            (runResult.signal === null ? "." : ` after ${runResult.signal}.`),
+    );
 }
 
 const summary = [
@@ -209,9 +222,10 @@ async function runCommand(
         child.stdout.on("data", (chunk: Uint8Array) => stdout.push(chunk));
         child.stderr.on("data", (chunk: Uint8Array) => stderr.push(chunk));
         child.once("error", reject);
-        child.once("close", (exitCode) => {
+        child.once("close", (exitCode, signal) => {
             resolveResult({
                 exitCode: exitCode ?? 1,
+                signal,
                 stdout: Buffer.concat(stdout).toString("utf8"),
                 stderr: Buffer.concat(stderr).toString("utf8"),
             });
