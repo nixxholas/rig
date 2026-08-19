@@ -509,6 +509,10 @@ export class EventsModule implements AgentModule<AnyAgentTool> {
                     ...result,
                     provider: scope.agent.provider,
                     ...(scope.agent.model === undefined ? {} : { model: scope.agent.model }),
+                    // The model's context keeps the real bytes; the journal row would otherwise
+                    // carry the same media blob in the result, projection, and partial at once
+                    // and overrun the durable payload bound.
+                    content: boundedOutputBlocks(result.content),
                     rigEvent:
                         next === undefined
                             ? completion
@@ -904,10 +908,13 @@ function toolExecutionEnd(
     content: readonly SessionOutputBlock[],
     isError: boolean | undefined,
 ): UnknownRecord {
+    // The journal keeps a tool result's text but not its media bytes: the model's context holds
+    // the real image, and an unbounded blob repeated through the result, its projection, and
+    // every following partial would overrun the durable event payload bound.
     const rendered = content.map((block) =>
         block.type === "text"
             ? { text: block.text, type: "text" }
-            : { data: block.data, mediaType: block.mimeType, type: "image" },
+            : { mediaType: block.mimeType, type: "image" },
     );
     const display =
         content
@@ -928,6 +935,13 @@ function toolExecutionEnd(
         },
         type: "tool_execution_end",
     };
+}
+
+/** The journal's copy of a tool result keeps text blocks whole and media as metadata only. */
+function boundedOutputBlocks(content: readonly SessionOutputBlock[]): readonly UnknownRecord[] {
+    return content.map((block) =>
+        block.type === "text" ? { ...block } : { mimeType: block.mimeType, type: "image" },
+    );
 }
 
 function requireActive(run: ActiveRun, kind: ActiveRun["activeKind"]): number {
