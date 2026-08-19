@@ -65,6 +65,13 @@ A module that needs to reach a vendor takes this module and asks it, instead of 
 registry or building a second one that would sign in again. `bedrockSearchModels` answers the same
 way for the models a Bedrock account serves its hosted search index from.
 
+A Bedrock account may name an AWS `profile`, including one backed by the standard
+`credential_process` setting in the AWS shared config. Optional `config_file` and
+`credentials_file` values select nonstandard AWS shared files. The account keeps the refreshable
+AWS credential provider, so process credentials are renewed without storing returned keys in Rig.
+When no authentication source is named, Bedrock tries its bearer-token environment variable first
+and then the ambient AWS credential chain.
+
 `load` takes an `inference` override for tests, which replaces both. It belongs here rather than
 where the agent starts, because a scripted account has to reach every module that names one.
 

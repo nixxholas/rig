@@ -191,6 +191,9 @@ describe("ConfigModule", () => {
                 'include_models = ["openai/gpt-5.6-sol"]',
                 "",
                 "[providers.bedrock]",
+                'config_file = "/tmp/aws-config"',
+                'credentials_file = "/tmp/aws-credentials"',
+                'profile = "work-bedrock"',
                 'region = "us-east-1"',
                 'search_model = "openai.gpt-oss-120b"',
                 "",
@@ -205,7 +208,12 @@ describe("ConfigModule", () => {
             features: { cross_workspace: true },
             provider_default_enable: false,
             providers: {
-                bedrock: { region: "us-east-1" },
+                bedrock: {
+                    config_file: "/tmp/aws-config",
+                    credentials_file: "/tmp/aws-credentials",
+                    profile: "work-bedrock",
+                    region: "us-east-1",
+                },
                 codex: { include_models: ["openai/gpt-5.6-sol"] },
             },
         });

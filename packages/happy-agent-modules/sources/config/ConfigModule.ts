@@ -145,6 +145,8 @@ const providerInputSchemas = {
             ...providerCommonInput,
             bearer_token: Type.Optional(configStringSchema),
             bearer_token_env_var: Type.Optional(configStringSchema),
+            config_file: Type.Optional(pathSchema),
+            credentials_file: Type.Optional(pathSchema),
             model_overrides: Type.Optional(
                 Type.Record(
                     configStringSchema,
@@ -161,6 +163,7 @@ const providerInputSchemas = {
                     { maxProperties: MAX_CONFIG_TABLE_ENTRIES },
                 ),
             ),
+            profile: Type.Optional(configStringSchema),
             region: Type.Optional(configStringSchema),
             search_model: Type.Optional(configStringSchema),
             type: Type.Optional(Type.Literal("bedrock")),
@@ -453,6 +456,8 @@ const providerSchemas = {
             ...providerRecordBase,
             bearerToken: Type.Optional(configStringSchema),
             bearerTokenEnvVar: Type.Optional(configStringSchema),
+            configFile: Type.Optional(pathSchema),
+            credentialsFile: Type.Optional(pathSchema),
             modelOverrides: Type.Optional(
                 Type.Record(
                     configStringSchema,
@@ -469,6 +474,7 @@ const providerSchemas = {
                     { maxProperties: MAX_CONFIG_TABLE_ENTRIES },
                 ),
             ),
+            profile: Type.Optional(configStringSchema),
             region: Type.Optional(configStringSchema),
             searchModelId: Type.Optional(configStringSchema),
             type: Type.Literal("bedrock"),
@@ -1831,9 +1837,14 @@ function normalizeProvider(id: string, value: Record<string, unknown>): Record<s
                 ...(value["bearer_token_env_var"] === undefined
                     ? {}
                     : { bearerTokenEnvVar: value["bearer_token_env_var"] }),
+                ...(value["config_file"] === undefined ? {} : { configFile: value["config_file"] }),
+                ...(value["credentials_file"] === undefined
+                    ? {}
+                    : { credentialsFile: value["credentials_file"] }),
                 ...(value["model_overrides"] === undefined
                     ? {}
                     : { modelOverrides: value["model_overrides"] }),
+                ...(value["profile"] === undefined ? {} : { profile: value["profile"] }),
                 ...(value["region"] === undefined ? {} : { region: value["region"] }),
                 ...(value["search_model"] === undefined
                     ? {}

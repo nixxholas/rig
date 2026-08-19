@@ -1,6 +1,7 @@
 import { AgentProviders, type AgentModel } from "@slopus/happy-agent-base";
 import {
     AnthropicProvider,
+    BedrockAwsCredential,
     BedrockBearerTokenCredential,
     ClaudeApiKeyCredential,
     ClaudeAuthTokenCredential,
@@ -282,15 +283,40 @@ async function createProvider(
             ? {}
             : { bearerTokenEnvVar: provider.bearerTokenEnvVar }),
     };
+    const explicitBearer =
+        provider.bearerToken !== undefined || provider.bearerTokenEnvVar !== undefined;
+    const explicitAws =
+        provider.configFile !== undefined ||
+        provider.credentialsFile !== undefined ||
+        provider.profile !== undefined;
+    const aws = {
+        ...(provider.configFile === undefined ? {} : { configFilepath: provider.configFile }),
+        ...(provider.credentialsFile === undefined
+            ? {}
+            : { credentialsFilepath: provider.credentialsFile }),
+        // Naming either shared file selects its default profile instead of allowing unrelated
+        // environment credentials to win the standard AWS chain.
+        ...(provider.profile === undefined
+            ? explicitAws
+                ? { profile: "default" }
+                : {}
+            : { profile: provider.profile }),
+    };
+    const bearerCredential = explicitAws
+        ? null
+        : await BedrockBearerTokenCredential.tryLoad(
+              ambient
+                  ? bearer
+                  : {
+                        ...bearer,
+                        env: provider.bearerTokenEnvVar === undefined ? {} : process.env,
+                    },
+          );
     const credential = required(
-        await BedrockBearerTokenCredential.tryLoad(
-            ambient
-                ? bearer
-                : {
-                      ...bearer,
-                      env: provider.bearerTokenEnvVar === undefined ? {} : process.env,
-                  },
-        ),
+        bearerCredential ??
+            (explicitAws || (ambient && !explicitBearer)
+                ? await BedrockAwsCredential.tryLoad(aws)
+                : null),
         "Bedrock",
         id,
     );

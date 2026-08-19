@@ -746,7 +746,7 @@ include_models = ["xai/grok-build"]
 type = "bedrock"
 enabled = true
 region = "us-west-2"
-bearer_token_env_var = "WEST_BEDROCK_TOKEN"
+profile = "work-bedrock"
 
 [providers.west_bedrock.model_overrides]
 "openai/gpt-5.6-sol" = { region = "us-east-1", endpoint = "https://bedrock-mantle.example/openai/v1", transport = "mantle" }
@@ -763,8 +763,11 @@ that provider instance. Grok instances
 accept `auth_file` and `base_url`; `RIG_GROK_BASE_URL` is also available for
 local proxy testing. Kimi instances accept `auth_file` and `base_url`;
 `RIG_KIMI_BASE_URL` is available for local proxy testing. Bedrock instances
-accept `region`, `model_overrides`, and `bearer_token_env_var`. `region` is the
-provider default. Each exact Rig model ID under `model_overrides` may set
+accept `region`, `model_overrides`, `bearer_token_env_var`, `profile`,
+`config_file`, and `credentials_file`. `profile` selects the standard AWS SDK
+credential chain, including a profile's `credential_process`; the two file
+settings optionally replace the standard AWS shared config and credentials
+paths. `region` is the provider default. Each exact Rig model ID under `model_overrides` may set
 `region`, `endpoint`, `transport`, or any combination. Anthropic models prefer
 Mantle in regions where both the endpoint and model are available in-region,
 then fall back to Bedrock Runtime regional or global inference profiles. A full
@@ -932,8 +935,28 @@ schedulers, or dedicated Plan mode.
 <details>
 <summary><strong>Amazon Bedrock</strong></summary>
 
-Bedrock becomes available when the daemon starts with an
-`AWS_BEARER_TOKEN_BEDROCK` value:
+Bedrock becomes available through either an `AWS_BEARER_TOKEN_BEDROCK` value or
+the standard AWS credential chain. For a process-backed AWS profile, configure
+the process in `~/.aws/config` using the normal AWS format:
+
+```ini
+[profile work-bedrock]
+credential_process = /usr/local/bin/your-credential-helper --format aws
+region = us-east-1
+```
+
+Then select that profile in the machine-wide `happy.toml`:
+
+```toml
+[providers.bedrock]
+enabled = true
+profile = "work-bedrock"
+```
+
+The helper must print the AWS credential-process Version 1 JSON shape. Rig
+keeps the refreshable AWS provider rather than storing the returned access key,
+so expiring credentials are renewed by the AWS SDK. To use a Bedrock bearer
+token instead:
 
 ```sh
 export AWS_BEARER_TOKEN_BEDROCK="your Bedrock API key"
@@ -958,7 +981,12 @@ enabled = true
 ```
 
 Rig uses `AWS_REGION`, then `AWS_DEFAULT_REGION`, and otherwise defaults to
-`us-east-1`. Restart an already-running daemon after changing these variables.
+`us-east-1`. With no explicit Bedrock authentication setting, Rig checks the
+bearer token first and then the ambient AWS chain (`AWS_PROFILE`, environment
+credentials, shared files, ECS, and EC2 metadata). Optional `config_file` and
+`credentials_file` settings select nonstandard shared files; when `profile` is
+omitted with either file, Rig uses the `default` profile. Restart an
+already-running daemon after changing these settings or variables.
 The available model list follows AWS regional availability. GPT-5.6 Sol, Terra,
 and Luna use Amazon Bedrock's Responses API and its 272,000-token context limit.
 Sol is available in `us-east-1` and `us-east-2`; Terra and Luna are also
