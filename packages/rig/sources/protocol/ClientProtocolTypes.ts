@@ -1,4 +1,5 @@
 import { Type, type Static } from "@sinclair/typebox";
+import type { ToolPermissionReview } from "@slopus/happy-agent-client";
 import type { SessionProviderError } from "@slopus/happy-providers";
 
 import type { Attachment } from "./Attachment.js";
@@ -144,6 +145,12 @@ export type ToolResultPresentation =
     | FileDiffToolResultPresentation
     | SearchToolResultPresentation;
 
+/** The complete automatic-review annotation for one tool call. */
+export interface ToolPermission {
+    elevated: boolean;
+    review: ToolPermissionReview;
+}
+
 export interface ToolCallBlock {
     arguments: unknown;
     id: string;
@@ -153,9 +160,13 @@ export interface ToolCallBlock {
     namespace?: string;
     presentation?: ToolCallPresentation;
     providerToolCallId?: string;
+    /** Present exactly when this invocation crossed the automatic-review boundary. */
+    toolPermission?: ToolPermission;
     type: "tool_call";
     vendor?: unknown;
 }
+
+export type { ToolPermissionReview };
 
 export interface ToolResultFailure {
     kind: "execution_failed" | "interrupted" | "invalid_arguments" | "tool_unavailable";

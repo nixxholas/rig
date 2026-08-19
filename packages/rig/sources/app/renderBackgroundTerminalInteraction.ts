@@ -11,6 +11,7 @@ const DIM = "\x1b[2m";
 export function renderBackgroundTerminalInteraction(
     interaction: BackgroundTerminalInteractionPresentation,
     width: number,
+    review?: string,
 ): string[] {
     if (interaction.input.length === 0) return [];
 
@@ -21,9 +22,13 @@ export function renderBackgroundTerminalInteraction(
     const lines = [truncateToWidth(header, Math.max(1, width), "", true)];
 
     const input = sanitizeTerminalText(interaction.input).replaceAll("\r", "");
-    if (input.length === 0) return lines;
+    const childRows = [
+        ...(review === undefined ? [] : [{ prefix: DIM, suffix: RESET, text: review }]),
+        ...(input.length === 0 ? [] : [{ text: input }]),
+    ];
+    if (childRows.length === 0) return lines;
     lines.push(
-        ...renderChildRows([{ text: input }], {
+        ...renderChildRows(childRows, {
             afterMarker: RESET,
             markerStyle: DIM,
             width,

@@ -443,6 +443,8 @@ export class EventsModule implements AgentModule<AnyAgentTool> {
                         event,
                         rigEvent: projected.rigEvent,
                         runId: projected.run.runId,
+                        provider: scope.agent.provider,
+                        ...(scope.agent.model === undefined ? {} : { model: scope.agent.model }),
                         ...(event.type === "text_end" ? { text: projected.run.text } : {}),
                     },
                     type: "provider.event",
@@ -465,6 +467,8 @@ export class EventsModule implements AgentModule<AnyAgentTool> {
                         type: "tool_execution_start",
                     },
                     runId,
+                    provider: scope.agent.provider,
+                    ...(scope.agent.model === undefined ? {} : { model: scope.agent.model }),
                 },
                 type: "tool.started",
             });
@@ -503,6 +507,8 @@ export class EventsModule implements AgentModule<AnyAgentTool> {
                 agentId: scope.agent.id,
                 payload: {
                     ...result,
+                    provider: scope.agent.provider,
+                    ...(scope.agent.model === undefined ? {} : { model: scope.agent.model }),
                     rigEvent:
                         next === undefined
                             ? completion

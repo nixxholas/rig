@@ -1,6 +1,8 @@
 import { Type, type Static, type TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 
+import { toolPermissionReviewSchema } from "../permissions/ToolPermissionReview.js";
+
 /** Stable bounds for durable history. These are deliberately generous for real transcripts. */
 export const MAX_HISTORY_RECORD_ID_LENGTH = 256;
 export const MAX_HISTORY_PROVIDER_LENGTH = 128;
@@ -186,6 +188,10 @@ export const historyToolCallBlockSchema = Type.Object(
         callId: boundedIdentifier(MAX_HISTORY_CALL_ID_LENGTH),
         name: boundedIdentifier(MAX_HISTORY_TOOL_NAME_LENGTH),
         arguments: Type.Optional(historyToolArgumentsSchema),
+        /** Present exactly when this invocation crossed the automatic-review boundary. */
+        elevated: Type.Optional(Type.Boolean()),
+        /** The bounded review outcome shown to public clients. */
+        review: Type.Optional(toolPermissionReviewSchema),
     },
     { additionalProperties: false },
 );
@@ -296,8 +302,9 @@ export function historyMessageWithinPersistenceBounds(message: unknown): boolean
         candidate.blocks.some(
             (block) =>
                 block.type === "tool_call" &&
-                block.arguments !== undefined &&
-                !historyToolArgumentsWithinByteLimit(block.arguments),
+                ((block.arguments !== undefined &&
+                    !historyToolArgumentsWithinByteLimit(block.arguments)) ||
+                    (block.elevated === undefined) !== (block.review === undefined)),
         )
     ) {
         return false;

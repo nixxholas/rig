@@ -2,6 +2,7 @@ import { Type, type Static, type TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 
 import { MAX_HISTORY_TOOL_OUTPUT_LENGTH } from "../history/index.js";
+import type { ToolPermissionReview } from "../permissions/index.js";
 
 const presentationTextSchema = Type.String({ maxLength: MAX_HISTORY_TOOL_OUTPUT_LENGTH });
 const nonEmptyPresentationTextSchema = Type.String({
@@ -68,6 +69,8 @@ export interface ToolCallProjection {
     readonly status: ToolCallStatus;
     readonly arguments?: unknown;
     readonly output?: string;
+    readonly elevated?: boolean;
+    readonly review?: ToolPermissionReview;
 }
 
 const codexExecArgumentsSchema = Type.Object(
@@ -120,6 +123,9 @@ export function toolCallResource(
         ...(omitRaw ? {} : { arguments: call.arguments ?? {} }),
         ...(call.status === "running" || omitRaw ? {} : { result: { output: call.output ?? "" } }),
         ...(presentation === undefined ? {} : { presentation }),
+        ...(call.elevated === undefined || call.review === undefined
+            ? {}
+            : { elevated: call.elevated, review: call.review }),
     };
 }
 

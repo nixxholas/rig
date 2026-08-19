@@ -308,6 +308,7 @@ export async function startHappyAgentRuntime(
             fileSearch,
             git,
             history,
+            permissions,
             titles,
             userInput,
             usage,

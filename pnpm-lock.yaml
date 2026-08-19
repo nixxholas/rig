@@ -253,8 +253,8 @@ importers:
         specifier: npm:@slopus/happy-agent-base@0.0.22
         version: 0.0.22(@aws-sdk/credential-provider-node@3.972.71)(@opentelemetry/api@1.9.1)(@smithy/signature-v4@5.6.9)(@types/pg@8.15.6)(sql.js@1.14.1)(ws@8.21.1)(zod@4.4.3)
       '@slopus/happy-agent-client':
-        specifier: 0.0.5
-        version: 0.0.5
+        specifier: 0.0.7
+        version: 0.0.7
       '@slopus/happy-agent-compute':
         specifier: npm:@slopus/happy-agent-compute@0.1.7
         version: 0.1.7
@@ -569,8 +569,8 @@ importers:
         specifier: 0.0.22
         version: 0.0.22(@aws-sdk/credential-provider-node@3.972.71)(@opentelemetry/api@1.9.1)(@smithy/signature-v4@5.6.9)(@types/pg@8.15.6)(sql.js@1.14.1)(ws@8.21.1)(zod@4.4.3)
       '@slopus/happy-agent-client':
-        specifier: 0.0.5
-        version: 0.0.5
+        specifier: 0.0.7
+        version: 0.0.7
       '@slopus/happy-agent-compute':
         specifier: 0.1.7
         version: 0.1.7
@@ -636,8 +636,8 @@ importers:
         specifier: workspace:*
         version: link:../happy-agent
       '@slopus/happy-agent-client':
-        specifier: 0.0.5
-        version: 0.0.5
+        specifier: 0.0.7
+        version: 0.0.7
       '@steve.kite/stdlib':
         specifier: 0.0.12
         version: 0.0.12
@@ -2017,8 +2017,8 @@ packages:
     resolution: {integrity: sha512-iZlGsLPDgrRKh8GpY4ZmGUuLgiouPMllJcPFiC9Pvluk8oiiLic21eD2lDoDJvjvmQCecEvCZ/Ee/2rUAPFn8g==}
     engines: {node: '>=22.19.0'}
 
-  '@slopus/happy-agent-client@0.0.5':
-    resolution: {integrity: sha512-1EW0AmOQjDEx/jr3DvL8Ru3H6aI8ZrRvFOMA+nuH1MsrKCo1ypBTP7r1LnqTa4YvDiUAeiFunN/3iFvSr6x5Vg==}
+  '@slopus/happy-agent-client@0.0.7':
+    resolution: {integrity: sha512-YejCpuhXaIPpngm0Te/8zF8iiNZ2MZtRRKAwpz/Q1ye9PkbVg7RFVsafvQ09D042fAUEI+2elzyUC0K6xJCnkA==}
     engines: {node: '>=20'}
 
   '@slopus/happy-agent-compute@0.1.7':
@@ -5256,7 +5256,7 @@ snapshots:
       - ws
       - zod
 
-  '@slopus/happy-agent-client@0.0.5':
+  '@slopus/happy-agent-client@0.0.7':
     dependencies:
       '@sinclair/typebox': 0.34.49
 

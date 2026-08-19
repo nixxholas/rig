@@ -13,7 +13,7 @@ interface CachedEntryRender {
     readonly mcpToolCall: AppTranscriptEntry["mcpToolCall"];
     readonly noticeChildren: AppTranscriptEntry["noticeChildren"];
     readonly omittedFileDiffs: number | undefined;
-    readonly permissionReview: string | undefined;
+    readonly toolPermission: AppTranscriptEntry["toolPermission"];
     readonly role: AppTranscriptEntry["role"];
     readonly text: string;
     readonly theme: object;
@@ -47,7 +47,7 @@ export class TranscriptEntryRenderCache {
             mcpToolCall: entry.mcpToolCall,
             noticeChildren: entry.noticeChildren,
             omittedFileDiffs: entry.omittedFileDiffs,
-            permissionReview: entry.permissionReview,
+            toolPermission: entry.toolPermission,
             role: entry.role,
             text: entry.text,
             theme: options.theme,
@@ -80,7 +80,7 @@ function matches(
         cached.mcpToolCall === entry.mcpToolCall &&
         cached.noticeChildren === entry.noticeChildren &&
         cached.omittedFileDiffs === entry.omittedFileDiffs &&
-        cached.permissionReview === entry.permissionReview &&
+        cached.toolPermission === entry.toolPermission &&
         cached.role === entry.role &&
         cached.text === entry.text &&
         cached.theme === options.theme &&

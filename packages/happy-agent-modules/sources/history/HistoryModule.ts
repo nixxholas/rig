@@ -29,6 +29,10 @@ import {
 import { isUserOriginMetadata, senderAgentIdOf } from "../impl/messageOrigin.js";
 import type { EventsModule } from "../events/index.js";
 import {
+    toolPermissionReviewSchema,
+    type ToolPermissionReview,
+} from "../permissions/ToolPermissionReview.js";
+import {
     historyBlockSchema,
     historyMessageSchema,
     historyMessageInputSchema,
@@ -121,6 +125,7 @@ const excerptBudgetSchema = Type.Integer({
 const HISTORY_TABLE = "happy_agent_module_history";
 const HISTORY_RUNS_TABLE = "happy_agent_module_history_runs";
 const HISTORY_PENDING_TABLE = "happy_agent_module_history_pending";
+const HISTORY_TOOL_CALLS_TABLE = "happy_agent_module_history_tool_calls";
 
 /**
  * What a subscriber is handed once an append has committed.
@@ -231,6 +236,34 @@ export class HistoryModule implements AgentModule {
                             PRIMARY KEY (agent_id, position),
                             UNIQUE (agent_id, message_id)
                         )
+                    `),
+                );
+            },
+        ],
+        [
+            "003-history-tool-call-index",
+            async (_ctx, database) => {
+                await agentDatabaseRun(
+                    database,
+                    sql.raw(`
+                        CREATE TABLE IF NOT EXISTS ${HISTORY_TOOL_CALLS_TABLE} (
+                            agent_id TEXT NOT NULL,
+                            call_id TEXT NOT NULL,
+                            record_id TEXT NOT NULL,
+                            PRIMARY KEY (agent_id, call_id)
+                        )
+                    `),
+                );
+                await agentDatabaseRun(
+                    database,
+                    sql.raw(`
+                        INSERT INTO ${HISTORY_TOOL_CALLS_TABLE} (agent_id, call_id, record_id)
+                        SELECT history.agent_id,
+                               json_extract(block.value, '$.callId'),
+                               history.record_id
+                        FROM ${HISTORY_TABLE} AS history,
+                             json_each(history.message_json, '$.blocks') AS block
+                        WHERE json_extract(block.value, '$.type') = 'tool_call'
                     `),
                 );
             },
@@ -382,6 +415,101 @@ export class HistoryModule implements AgentModule {
                     LIMIT 1`,
             );
             return rows[0] === undefined ? undefined : toHistoryRecord(rows[0]).message;
+        });
+    }
+
+    /** The stable assistant message accumulated for one run, when that run has produced one. */
+    async assistantMessage(
+        ctx: Context,
+        agentId: string,
+        runId: string,
+    ): Promise<HistoryMessage | undefined> {
+        if (
+            !Value.Check(historyAgentIdSchema, agentId) ||
+            !Value.Check(historyRecordIdSchema, runId)
+        ) {
+            throw new Error("The history module received an invalid run-message lookup.");
+        }
+        return await this.#direct(ctx, async (txCtx) => {
+            const rows = await agentDatabaseRows<HistoryRow>(
+                txCtx.db,
+                sql`SELECT ${sql.raw(HISTORY_ROW_COLUMNS)}
+                    FROM ${sql.raw(HISTORY_TABLE)}
+                    WHERE agent_id = ${agentId} AND run_id = ${runId} AND role = 'assistant'
+                    ORDER BY position DESC
+                    LIMIT 1`,
+            );
+            return rows[0] === undefined ? undefined : toHistoryRecord(rows[0]).message;
+        });
+    }
+
+    /**
+     * Attach one automatic-review result to the durable tool call clients render.
+     *
+     * Review happens after inference has committed the call, so this is a separate atomic update
+     * under the call's stable index. Repeating the same result is harmless; contradicting a result
+     * already recorded is rejected rather than silently rewriting the audit fact.
+     */
+    async recordToolPermissionReview(
+        ctx: Context,
+        agentId: string,
+        callId: string,
+        elevated: boolean,
+        review: ToolPermissionReview,
+    ): Promise<HistoryMessage | undefined> {
+        if (
+            !Value.Check(historyAgentIdSchema, agentId) ||
+            !Value.Check(historyRecordIdSchema, callId) ||
+            !Value.Check(toolPermissionReviewSchema, review)
+        ) {
+            throw new Error("The history module received an invalid tool review.");
+        }
+        return await this.#direct(ctx, async (txCtx) => {
+            const rows = await agentDatabaseRows<HistoryRow>(
+                txCtx.db,
+                sql`SELECT ${sql.raw(HISTORY_ROW_COLUMNS)}
+                    FROM ${sql.raw(HISTORY_TABLE)}
+                    WHERE agent_id = ${agentId}
+                      AND record_id = (
+                          SELECT record_id
+                          FROM ${sql.raw(HISTORY_TOOL_CALLS_TABLE)}
+                          WHERE agent_id = ${agentId} AND call_id = ${callId}
+                          LIMIT 1
+                      )
+                    LIMIT 1`,
+            );
+            const row = rows[0];
+            if (row === undefined) return undefined;
+            const existing = toHistoryRecord(row).message;
+            let found = false;
+            const blocks = existing.blocks.map((block): HistoryBlock => {
+                if (block.type !== "tool_call" || block.callId !== callId) return block;
+                found = true;
+                if (block.review !== undefined || block.elevated !== undefined) {
+                    if (
+                        block.elevated !== elevated ||
+                        JSON.stringify(block.review) !== JSON.stringify(review)
+                    ) {
+                        throw new Error("The tool call already has another permission review.");
+                    }
+                    return block;
+                }
+                return { ...block, elevated, review };
+            });
+            if (!found) {
+                throw new Error("The tool-call index points to a message without that call.");
+            }
+            const updated: HistoryMessage = { ...existing, blocks };
+            if (!historyMessageWithinPersistenceBounds(updated)) {
+                throw new Error("The reviewed history message exceeds its durable bounds.");
+            }
+            await agentDatabaseRun(
+                txCtx.db,
+                sql`UPDATE ${sql.raw(HISTORY_TABLE)}
+                    SET message_json = ${JSON.stringify(updated)}
+                    WHERE agent_id = ${agentId} AND record_id = ${updated.recordId}`,
+            );
+            return updated;
         });
     }
 
@@ -903,6 +1031,7 @@ export class HistoryModule implements AgentModule {
                     tool_results = ${stats.toolResults}
                 WHERE agent_id = ${agentId} AND record_id = ${merged.recordId}`,
         );
+        await indexHistoryToolCalls(ctx.db, agentId, merged);
         this.#scheduleAppendNotification(ctx, agentId, [merged]);
     }
 
@@ -987,6 +1116,7 @@ export class HistoryModule implements AgentModule {
                         ${stats.toolResults}
                     )`,
             );
+            await indexHistoryToolCalls(ctx.db, agentId, message);
             position += 1;
         }
         this.#scheduleAppendNotification(ctx, agentId, messages);
@@ -1864,6 +1994,33 @@ function omitPresentedToolData(messages: readonly HistoryMessage[]): HistoryMess
             return clone;
         }),
     }));
+}
+
+/** Keep a narrow durable lookup from a provider call identity to its public history message. */
+async function indexHistoryToolCalls(
+    database: AgentDatabase,
+    agentId: string,
+    message: HistoryMessage,
+): Promise<void> {
+    for (const block of message.blocks) {
+        if (block.type !== "tool_call") continue;
+        await agentDatabaseRun(
+            database,
+            sql`INSERT INTO ${sql.raw(HISTORY_TOOL_CALLS_TABLE)} (agent_id, call_id, record_id)
+                VALUES (${agentId}, ${block.callId}, ${message.recordId})
+                ON CONFLICT (agent_id, call_id) DO NOTHING`,
+        );
+        const rows = await agentDatabaseRows<{ record_id: string }>(
+            database,
+            sql`SELECT record_id
+                FROM ${sql.raw(HISTORY_TOOL_CALLS_TABLE)}
+                WHERE agent_id = ${agentId} AND call_id = ${block.callId}
+                LIMIT 1`,
+        );
+        if (rows[0]?.record_id !== message.recordId) {
+            throw new Error("A tool-call identity is already indexed by another history message.");
+        }
+    }
 }
 
 function toSafeInteger(value: unknown, label: string): number {

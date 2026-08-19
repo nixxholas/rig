@@ -237,6 +237,63 @@ describe("HistoryModule durability", () => {
         }
     });
 
+    it("durably attaches one complete permission review to its indexed tool call", async () => {
+        const history = new HistoryModule();
+        const database = moduleDatabase(history.migrations, "history-tool-review-test");
+        await database.ready;
+
+        try {
+            await history.record(database.context, "agent-a", {
+                at: 123,
+                blocks: [
+                    {
+                        type: "tool_call",
+                        callId: "call-reviewed",
+                        name: "exec_command",
+                        arguments: { cmd: "git push" },
+                    },
+                ],
+                recordId: "run-a-assistant",
+                role: "assistant",
+                runId: "run-a",
+            });
+            const review = {
+                outcome: "allowed" as const,
+                reason: "The user explicitly asked to push.",
+                risk: "high" as const,
+                userAuthorization: "high" as const,
+            };
+
+            await expect(
+                history.recordToolPermissionReview(
+                    database.context,
+                    "agent-a",
+                    "call-reviewed",
+                    true,
+                    review,
+                ),
+            ).resolves.toMatchObject({
+                blocks: [{ elevated: true, review }],
+            });
+            await expect(
+                new HistoryModule().message(database.context, "agent-a", "run-a-assistant"),
+            ).resolves.toMatchObject({
+                blocks: [{ elevated: true, review }],
+            });
+            await expect(
+                history.recordToolPermissionReview(
+                    database.context,
+                    "agent-a",
+                    "call-reviewed",
+                    false,
+                    { ...review, outcome: "denied" },
+                ),
+            ).rejects.toThrow("another permission review");
+        } finally {
+            database.close();
+        }
+    });
+
     it("summarizes a failed tool result as a failure rather than as output", async () => {
         const history = new HistoryModule();
         const database = moduleDatabase(history.migrations, "history-tool-display-error-test");

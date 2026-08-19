@@ -8,6 +8,11 @@ import {
 } from "../history/index.js";
 import { toolCallResource, type MessageResourceOptions } from "./ApiToolPresentation.js";
 
+type ReviewedHistoryToolCall = Extract<HistoryBlock, { type: "tool_call" }> & {
+    readonly elevated: boolean;
+    readonly review: NonNullable<Extract<HistoryBlock, { type: "tool_call" }>["review"]>;
+};
+
 const providerTextBlockSchema = Type.Object(
     { type: Type.Literal("text"), text: Type.String() },
     { additionalProperties: true },
@@ -58,6 +63,13 @@ export function messageResource(
         role,
         createdAt: message.at ?? 0,
         content: historyBlocks(message.blocks, options),
+        metadata: {
+            ...(message.provider === undefined ? {} : { providerId: message.provider }),
+            ...(message.model === undefined ? {} : { modelId: message.model }),
+            ...(message.senderAgentId === undefined
+                ? {}
+                : { senderAgentId: message.senderAgentId }),
+        },
         ...(role === "user"
             ? {
                   status: "accepted",
@@ -72,6 +84,7 @@ export function messageResource(
 /** Project the live provider reducer's partial message content into the same public block shape. */
 export function providerMessageContent(
     value: unknown,
+    reviewedCalls: ReadonlyMap<string, ReviewedHistoryToolCall> = new Map(),
 ): readonly Record<string, unknown>[] | undefined {
     if (!Value.Check(providerContentSchema, value)) return undefined;
     const results = new Map<string, Static<typeof providerToolResultBlockSchema>>();
@@ -100,6 +113,7 @@ export function providerMessageContent(
         if (call === undefined) return [];
         const callId = call.id ?? call.callId ?? "unknown";
         const result = results.get(callId);
+        const reviewed = reviewedCalls.get(callId);
         return [
             toolCallResource(
                 {
@@ -112,6 +126,9 @@ export function providerMessageContent(
                               : "completed",
                     arguments: call.arguments ?? {},
                     ...(result === undefined ? {} : { output: providerToolOutput(result) }),
+                    ...(reviewed === undefined
+                        ? {}
+                        : { elevated: reviewed.elevated, review: reviewed.review }),
                 },
                 {},
             ),
@@ -153,10 +170,30 @@ function historyBlocks(
                               : "completed",
                     arguments: block.arguments,
                     ...(result === undefined ? {} : { output: result.output ?? "" }),
+                    ...(block.elevated === undefined || block.review === undefined
+                        ? {}
+                        : { elevated: block.elevated, review: block.review }),
                 },
                 options,
             );
         });
+}
+
+/** Review annotations from a durable message, keyed by the provider's stable call identity. */
+export function reviewedToolCalls(
+    message: HistoryMessage | undefined,
+): ReadonlyMap<string, ReviewedHistoryToolCall> {
+    const reviewed = new Map<string, ReviewedHistoryToolCall>();
+    for (const block of message?.blocks ?? []) {
+        if (
+            block.type === "tool_call" &&
+            block.elevated !== undefined &&
+            block.review !== undefined
+        ) {
+            reviewed.set(block.callId, block as ReviewedHistoryToolCall);
+        }
+    }
+    return reviewed;
 }
 
 function providerToolOutput(result: Static<typeof providerToolResultBlockSchema>): string {

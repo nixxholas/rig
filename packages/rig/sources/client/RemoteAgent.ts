@@ -729,6 +729,12 @@ function toRigMessage(message: ApiMessage): Message {
                 toRigAgentBlocks(message.id, block, index),
             ),
             id: message.id,
+            ...(message.metadata.providerId === undefined
+                ? {}
+                : { providerId: message.metadata.providerId }),
+            ...(message.metadata.modelId === undefined
+                ? {}
+                : { requestedModelId: message.metadata.modelId }),
             role: "agent",
         };
     }
@@ -773,6 +779,9 @@ function toRigAgentBlocks(
         id: toolCallId,
         name: block.name,
         ...(callPresentation === undefined ? {} : { presentation: callPresentation }),
+        ...(block.review === undefined
+            ? {}
+            : { toolPermission: { elevated: block.elevated, review: block.review } }),
         type: "tool_call",
     };
     if (block.status === "running") return [call];

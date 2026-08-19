@@ -93,12 +93,12 @@ import { formatSessionTokenStatus } from "./formatSessionTokenStatus.js";
 import { formatSessionUsageSummary } from "./formatSessionUsageSummary.js";
 import { formatSubagentToolCall } from "./formatSubagentToolCall.js";
 import { formatToolResultForDisplay } from "./formatToolResultForDisplay.js";
+import { formatToolPermissionNotice } from "./formatToolPermissionNotice.js";
 import { formatTurnUsageSummary } from "./formatTurnUsageSummary.js";
 import { providerErrorResetAt } from "./providerErrorResetAt.js";
 import { humanizeReasoningLevel } from "./humanizeReasoningLevel.js";
 import { humanizePermissionMode } from "./humanizePermissionMode.js";
 import { humanizeProviderId } from "./humanizeProviderId.js";
-import { humanizePermissionReviewLevel } from "./humanizePermissionReviewLevel.js";
 import { humanizeGoalStatus } from "./humanizeGoalStatus.js";
 import { humanizeToolName } from "./humanizeToolName.js";
 import { parseCodexMcpToolInvocation } from "./parseCodexMcpToolInvocation.js";
@@ -3626,16 +3626,22 @@ export class CodingAssistantApp implements Component, Focusable {
             }
             this.#reviewingPermissionToolCallIds.delete(event.toolCallId);
             this.#refreshToolActivityStatus();
-            if (event.decision === "deny") {
-                const toolEntry = this.#entries.find((entry) => entry.id === event.toolCallId);
-                if (toolEntry !== undefined) {
-                    toolEntry.permissionReview = `Refused: ${event.reason} Risk: ${humanizePermissionReviewLevel(event.risk)}. User authorization: ${humanizePermissionReviewLevel(event.userAuthorization)}.`;
-                }
+            const toolEntry = this.#entries.find((entry) => entry.id === event.toolCallId);
+            if (toolEntry !== undefined) {
+                toolEntry.toolPermission = {
+                    elevated: false,
+                    review: {
+                        outcome: event.decision === "allow" ? "allowed" : "denied",
+                        reason: event.reason,
+                        risk: event.risk,
+                        userAuthorization: event.userAuthorization,
+                    },
+                };
             }
         } else if (event.type === "temporary_full_access_started") {
             const toolEntry = this.#entries.find((entry) => entry.id === event.toolCallId);
-            if (toolEntry !== undefined) {
-                toolEntry.permissionReview = "Approved automatically: temporary Full access.";
+            if (toolEntry?.toolPermission?.review.outcome === "allowed") {
+                toolEntry.toolPermission = { ...toolEntry.toolPermission, elevated: true };
             }
         } else if (event.type === "background_processes_changed") {
             const nextProcesses: readonly BashSessionActivity[] =
@@ -3863,7 +3869,14 @@ export class CodingAssistantApp implements Component, Focusable {
 
             if (block.type === "thinking") {
                 this.#finishThinkingMessage(message.id, contentIndex, block.thinking);
-            } else if (block.type === "tool_call" && !this.#seenToolCallIds.has(block.id)) {
+            } else if (block.type === "tool_call") {
+                if (this.#seenToolCallIds.has(block.id)) {
+                    const existing = this.#entries.find((entry) => entry.id === block.id);
+                    if (existing !== undefined && block.toolPermission !== undefined) {
+                        existing.toolPermission = block.toolPermission;
+                    }
+                    continue;
+                }
                 this.#seenToolCallIds.add(block.id);
                 const mcpToolCall = this.#createMcpToolCall(block.name, block.arguments);
                 const exploration =
@@ -3880,6 +3893,9 @@ export class CodingAssistantApp implements Component, Focusable {
                     ...(execCommand === undefined ? {} : { execCommand }),
                     ...(exploration === undefined ? {} : { exploration }),
                     ...(mcpToolCall === undefined ? {} : { mcpToolCall }),
+                    ...(block.toolPermission === undefined
+                        ? {}
+                        : { toolPermission: block.toolPermission }),
                 });
             } else if (block.type === "tool_result") {
                 this.#finishToolResult(block);
@@ -4201,8 +4217,8 @@ export class CodingAssistantApp implements Component, Focusable {
         if (entry.noticeChildren !== undefined) {
             completeEntry.noticeChildren = entry.noticeChildren;
         }
-        if (entry.permissionReview !== undefined) {
-            completeEntry.permissionReview = entry.permissionReview;
+        if (entry.toolPermission !== undefined) {
+            completeEntry.toolPermission = entry.toolPermission;
         }
         if (entry.providerError !== undefined) {
             completeEntry.providerError = entry.providerError;
@@ -4422,25 +4438,35 @@ export class CodingAssistantApp implements Component, Focusable {
             return [renderBackgroundTerminalCompletion(entry.backgroundTerminalCompletion, width)];
         }
         if (entry.backgroundTerminalInteraction !== undefined) {
-            return renderBackgroundTerminalInteraction(entry.backgroundTerminalInteraction, width);
+            return renderBackgroundTerminalInteraction(
+                entry.backgroundTerminalInteraction,
+                width,
+                entry.toolPermission === undefined
+                    ? undefined
+                    : formatToolPermissionNotice(entry.toolPermission),
+            );
         }
         if (entry.execCommand !== undefined) {
             const active = this.#activeToolCallIds.has(entry.id);
             const stopped = this.#stoppedToolCallIds.has(entry.id);
             const isError = entry.role === "error";
+            const elevated = entry.toolPermission?.elevated === true;
+            const verb = stopped ? "Stopped" : isError ? "Failed" : active ? "Running" : "Ran";
             return renderExecCommand(entry.execCommand, {
                 active,
                 brand: this.#theme.brand,
                 ...(entry.detail === undefined ? {} : { detail: entry.detail }),
                 primary: this.#theme.primary,
-                ...(entry.permissionReview === undefined ? {} : { review: entry.permissionReview }),
+                ...(entry.toolPermission === undefined
+                    ? {}
+                    : { review: formatToolPermissionNotice(entry.toolPermission) }),
                 status:
                     stopped || isError
                         ? this.#theme.error
-                        : active
+                        : active || elevated
                           ? this.#theme.warning
                           : this.#theme.success,
-                verb: stopped ? "Stopped" : isError ? "Failed" : active ? "Running" : "Ran",
+                verb: elevated && !stopped && !isError ? `${verb} elevated` : verb,
                 width,
             });
         }
@@ -4685,7 +4711,7 @@ export class CodingAssistantApp implements Component, Focusable {
         return (
             entry?.exploration !== undefined &&
             entry.role === "tool" &&
-            entry.permissionReview === undefined &&
+            entry.toolPermission === undefined &&
             !this.#stoppedToolCallIds.has(entry.id)
         );
     }
@@ -5750,17 +5776,19 @@ export class CodingAssistantApp implements Component, Focusable {
         const active = this.#activeToolCallIds.has(entry.id);
         const awaitingApproval = this.#awaitingApprovalToolCallIds.has(entry.id);
         const stopped = this.#stoppedToolCallIds.has(entry.id);
-        const verb = stopped
+        const elevated = entry.toolPermission?.elevated === true;
+        const baseVerb = stopped
             ? "Stopped"
             : isError
               ? "Failed"
               : awaitingApproval
                 ? "Awaiting approval"
                 : this.#toolVerb(toolName, active);
+        const verb = elevated && !stopped && !isError ? `${baseVerb} elevated` : baseVerb;
         const dot =
             stopped || isError
                 ? this.#theme.error
-                : awaitingApproval
+                : awaitingApproval || elevated
                   ? this.#theme.warning
                   : this.#theme.success;
         const callText = this.#singleLine(entry.text);
@@ -5769,8 +5797,12 @@ export class CodingAssistantApp implements Component, Focusable {
         const title = `${dot}•${RESET} ${this.#theme.brand}${BOLD}${verb}${NOT_BOLD_OR_DIM}${this.#theme.primary} ${displayText}${RESET}`;
         const lines = [this.#fitLine(title, width)];
         const childRows: ChildRow[] = [];
-        if (entry.permissionReview !== undefined && width >= 5) {
-            childRows.push({ prefix: DIM, suffix: RESET, text: entry.permissionReview });
+        if (entry.toolPermission !== undefined && width >= 5) {
+            childRows.push({
+                prefix: DIM,
+                suffix: RESET,
+                text: formatToolPermissionNotice(entry.toolPermission),
+            });
         }
         if (entry.detail !== undefined) {
             const detailText = entry.detail.length > 0 ? entry.detail : "(empty result)";
@@ -5811,7 +5843,9 @@ export class CodingAssistantApp implements Component, Focusable {
         return renderCodexMcpToolCall(
             {
                 invocation: call.invocation,
-                ...(entry.permissionReview === undefined ? {} : { review: entry.permissionReview }),
+                ...(entry.toolPermission === undefined
+                    ? {}
+                    : { review: formatToolPermissionNotice(entry.toolPermission) }),
                 ...(result === undefined ? {} : { result }),
                 status: stopped ? "error" : call.status,
             },
@@ -5837,14 +5871,16 @@ export class CodingAssistantApp implements Component, Focusable {
         const palette =
             this.#theme.isLight === true ? CODEX_LIGHT_DIFF_PALETTE : CODEX_DARK_DIFF_PALETTE;
         const lines: string[] = [];
-        if (entry.permissionReview !== undefined && width >= 5) {
+        if (entry.toolPermission !== undefined && width >= 5) {
             lines.push(
                 ...renderChildRows(
                     [
                         {
                             prefix: DIM,
                             suffix: NOT_BOLD_OR_DIM,
-                            text: sanitizeTerminalText(entry.permissionReview),
+                            text: sanitizeTerminalText(
+                                formatToolPermissionNotice(entry.toolPermission),
+                            ),
                         },
                     ],
                     { markerStyle: DIM, width },

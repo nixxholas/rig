@@ -332,6 +332,8 @@ export type {
     ThinkingBlock,
     ToolCallBlock,
     ToolCallPresentation,
+    ToolPermission,
+    ToolPermissionReview,
     ToolResultBlock,
     ToolResultPresentation,
     Usage,

@@ -17,7 +17,7 @@ import {
 } from "@slopus/happy-agent-base";
 import type { Static, TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
-import type { Context } from "@steve.kite/stdlib";
+import { afterCommit, type Context } from "@steve.kite/stdlib";
 import { WebSocketServer } from "ws";
 
 import { AbortModule } from "../abort/index.js";
@@ -36,6 +36,11 @@ import { GitModule } from "../git/index.js";
 import { HistoryModule } from "../history/index.js";
 import type { HistoryPendingMessage } from "../history/index.js";
 import { USER_MESSAGE_ORIGIN_METADATA } from "../impl/messageOrigin.js";
+import {
+    PermissionsModule,
+    type PermissionEvent,
+    type ToolPermissionReview,
+} from "../permissions/index.js";
 import {
     ProfileModule,
     ProfileVersionConflictError,
@@ -72,7 +77,11 @@ import {
 } from "../workspaces/index.js";
 import { ApiError, invalidRequest, notFound, type ApiErrorCode } from "./ApiError.js";
 import { ApiEventJournal, type ApiEvent } from "./ApiEventJournal.js";
-import { messageResource, providerMessageContent } from "./ApiMessageProjection.js";
+import {
+    messageResource,
+    providerMessageContent,
+    reviewedToolCalls,
+} from "./ApiMessageProjection.js";
 import {
     agentResource,
     agentModeFromConfig,
@@ -108,7 +117,7 @@ import {
 } from "./ApiSchemas.js";
 import { WorkspaceProxy } from "./WorkspaceProxy.js";
 
-const API_PROTOCOL_VERSION = 18;
+const API_PROTOCOL_VERSION = 19;
 const MAX_JSON_BODY_BYTES = 48 * 1024 * 1024;
 const HEARTBEAT_MS = 15_000;
 const TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/;
@@ -147,6 +156,7 @@ export class ApiModule implements AgentModule {
     readonly #fileSearch: WorkspaceFileSearchModule;
     readonly #git: GitModule;
     readonly #history: HistoryModule;
+    readonly #permissions: PermissionsModule;
     readonly #titles: TitlesModule;
     readonly #userInput: UserInputModule;
     readonly #usage: UsageModule;
@@ -199,6 +209,7 @@ export class ApiModule implements AgentModule {
         fileSearch: WorkspaceFileSearchModule,
         git: GitModule,
         history: HistoryModule,
+        permissions: PermissionsModule,
         titles: TitlesModule,
         userInput: UserInputModule,
         usage: UsageModule,
@@ -215,6 +226,7 @@ export class ApiModule implements AgentModule {
         this.#fileSearch = fileSearch;
         this.#git = git;
         this.#history = history;
+        this.#permissions = permissions;
         this.#titles = titles;
         this.#userInput = userInput;
         this.#usage = usage;
@@ -635,6 +647,9 @@ export class ApiModule implements AgentModule {
                     });
                 }
             }),
+            this.#permissions.onEvent(async (eventCtx, event) => {
+                await this.#convertPermissionEvent(eventCtx, event);
+            }),
             this.#userInput.onEvent(async (_eventCtx, event) => {
                 await this.#convertUserInputEvent(ctx, event);
             }),
@@ -1006,7 +1021,7 @@ export class ApiModule implements AgentModule {
             return;
         }
         if (event.type === "provider.event" || event.type === "tool.completed") {
-            this.#convertProviderMessageEvent(event, payload);
+            await this.#convertProviderMessageEvent(ctx, event, payload);
         }
         if (event.type === "inference.completed") {
             this.#recordRunUsage(agentId, payload);
@@ -1037,10 +1052,11 @@ export class ApiModule implements AgentModule {
         this.#activeRuns.set(agentId, { ...run, usage });
     }
 
-    #convertProviderMessageEvent(
+    async #convertProviderMessageEvent(
+        ctx: Context,
         event: AgentEvent,
         payload: Readonly<Record<string, unknown>> | undefined,
-    ): void {
+    ): Promise<void> {
         if (payload?.["recovered"] === true) return;
         const agentId = event.agentId;
         const underlyingRunId = stringValue(payload?.["runId"]);
@@ -1052,6 +1068,14 @@ export class ApiModule implements AgentModule {
         const runId =
             (this.#activeRuns.get(agentId)?.["id"] as string | undefined) ?? underlyingRunId;
         const messageId = apiAssistantMessageId(runId);
+        const metadata = {
+            ...(stringValue(payload?.["provider"]) === undefined
+                ? {}
+                : { providerId: stringValue(payload?.["provider"]) }),
+            ...(stringValue(payload?.["model"]) === undefined
+                ? {}
+                : { modelId: stringValue(payload?.["model"]) }),
+        };
         if (type === "block_start") {
             this.#journal.append(
                 "message.created",
@@ -1063,6 +1087,7 @@ export class ApiModule implements AgentModule {
                         role: "agent",
                         createdAt: event.occurredAt,
                         content: [],
+                        metadata,
                     },
                 },
                 event.occurredAt,
@@ -1095,7 +1120,8 @@ export class ApiModule implements AgentModule {
             return;
         }
         const partial = recordValue(rigEvent?.["partial"]);
-        const content = providerMessageContent(partial?.["content"]);
+        const historical = await this.#history.assistantMessage(ctx, agentId, runId);
+        const content = providerMessageContent(partial?.["content"], reviewedToolCalls(historical));
         if (content === undefined) return;
         this.#journal.append(
             "message.updated",
@@ -1107,10 +1133,63 @@ export class ApiModule implements AgentModule {
                     role: "agent",
                     createdAt: event.occurredAt,
                     content,
+                    metadata,
                 },
             },
             event.occurredAt,
         );
+    }
+
+    async #convertPermissionEvent(ctx: Context, event: PermissionEvent): Promise<void> {
+        let elevated: boolean;
+        let review: ToolPermissionReview;
+        if (event.type === "permission_action_reviewed") {
+            elevated = event.elevated;
+            review = {
+                outcome: "allowed",
+                reason: event.reason,
+                risk: event.risk,
+                userAuthorization: event.userAuthorization,
+            };
+        } else if (event.type === "permission_action_denied") {
+            elevated = false;
+            review = {
+                outcome: "denied",
+                reason: event.reason,
+                risk: event.risk,
+                userAuthorization: event.userAuthorization,
+            };
+        } else if (event.type === "permission_action_unproven") {
+            elevated = false;
+            review = {
+                outcome: "unproven",
+                kind: event.kind,
+                reason: event.reason,
+            };
+        } else {
+            return;
+        }
+        const message = await this.#history.recordToolPermissionReview(
+            ctx,
+            event.agentId,
+            event.callId,
+            elevated,
+            review,
+        );
+        if (message === undefined || message.runId === undefined) {
+            throw new Error("The reviewed tool call is missing from public message history.");
+        }
+        const runId = message.runId;
+        afterCommit(ctx, () => {
+            this.#journal.append("message.updated", {
+                agentId: event.agentId,
+                runId,
+                message: {
+                    ...messageResource(message),
+                    id: apiAssistantMessageId(runId),
+                },
+            });
+        });
     }
 
     async #appendAgentUpdate(

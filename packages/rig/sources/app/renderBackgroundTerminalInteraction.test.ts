@@ -32,6 +32,25 @@ describe("renderBackgroundTerminalInteraction", () => {
             ),
         ).toBe("↳ Interacted with background terminal · read value\n  └ hello\n    world");
     });
+
+    it("keeps an automatic review notice attached to actual input", () => {
+        expect(
+            stripAnsi(
+                renderBackgroundTerminalInteraction(
+                    {
+                        command: "read value",
+                        input: "hello",
+                        sessionId: 1,
+                        type: "background_terminal_interaction",
+                    },
+                    80,
+                    "Auto-reviewed: Allowed. Stayed sandboxed.",
+                ).join("\n"),
+            ),
+        ).toBe(
+            "↳ Interacted with background terminal · read value\n  └ Auto-reviewed: Allowed. Stayed sandboxed.\n    hello",
+        );
+    });
 });
 
 function stripAnsi(value: string): string {

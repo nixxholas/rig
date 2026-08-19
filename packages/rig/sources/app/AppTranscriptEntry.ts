@@ -1,4 +1,4 @@
-import type { ProviderError, Usage } from "../protocol/index.js";
+import type { ProviderError, ToolPermission, Usage } from "../protocol/index.js";
 
 import type {
     BackgroundTerminalInteractionPresentation,
@@ -32,7 +32,8 @@ export interface AppTranscriptEntry {
     id: string;
     mcpToolCall?: CodexMcpToolCall;
     noticeChildren?: readonly NoticeChild[];
-    permissionReview?: string;
+    /** Public automatic-review result and whether this call received temporary Full access. */
+    toolPermission?: ToolPermission;
     /** Structured provider failure used to keep reset countdowns live. */
     providerError?: ProviderError;
     providerErrorFallback?: string;

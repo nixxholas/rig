@@ -3,7 +3,11 @@ import { describe, expect, it } from "vitest";
 
 import { eventIdSchema } from "../../sources/events/index.js";
 import { apiResourceVersion } from "../../sources/api/ApiResourceProjection.js";
-import { messageResource, providerMessageContent } from "../../sources/api/ApiMessageProjection.js";
+import {
+    messageResource,
+    providerMessageContent,
+    reviewedToolCalls,
+} from "../../sources/api/ApiMessageProjection.js";
 import { toolCallResource } from "../../sources/api/ApiToolPresentation.js";
 
 describe("apiResourceVersion", () => {
@@ -63,7 +67,68 @@ describe("messageResource", () => {
                     },
                 },
             ],
+            metadata: {},
         });
+    });
+
+    it("projects typed message provenance and keeps permission review on live tool updates", () => {
+        const historyMessage = {
+            at: 100,
+            blocks: [
+                {
+                    type: "tool_call" as const,
+                    callId: "call-reviewed",
+                    name: "exec_command",
+                    arguments: { cmd: "git push" },
+                    elevated: true,
+                    review: {
+                        outcome: "allowed" as const,
+                        reason: "The user explicitly asked to push.",
+                        risk: "high" as const,
+                        userAuthorization: "high" as const,
+                    },
+                },
+            ],
+            model: "openai/gpt-5.6-sol",
+            provider: "codex",
+            recordId: "message-reviewed",
+            role: "assistant" as const,
+        };
+
+        expect(messageResource(historyMessage)).toMatchObject({
+            metadata: { modelId: "openai/gpt-5.6-sol", providerId: "codex" },
+            content: [
+                {
+                    type: "tool_call",
+                    elevated: true,
+                    review: {
+                        outcome: "allowed",
+                        reason: "The user explicitly asked to push.",
+                        risk: "high",
+                        userAuthorization: "high",
+                    },
+                },
+            ],
+        });
+        expect(
+            providerMessageContent(
+                [
+                    {
+                        type: "toolCall",
+                        id: "call-reviewed",
+                        name: "exec_command",
+                        arguments: { cmd: "git push" },
+                    },
+                ],
+                reviewedToolCalls(historyMessage),
+            ),
+        ).toMatchObject([
+            {
+                type: "tool_call",
+                elevated: true,
+                review: { outcome: "allowed" },
+            },
+        ]);
     });
 
     it("uses exactly the same completed tool-call shape for events and history", () => {

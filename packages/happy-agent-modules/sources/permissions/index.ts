@@ -73,3 +73,5 @@ export {
     permissionUnprovenKindSchema,
 } from "./impl/permissionRefusalMessage.js";
 export type { PermissionUnprovenKind } from "./impl/permissionRefusalMessage.js";
+export { toolPermissionReviewSchema } from "./ToolPermissionReview.js";
+export type { ToolPermissionReview } from "./ToolPermissionReview.js";
