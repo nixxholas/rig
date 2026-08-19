@@ -7,6 +7,10 @@ import { Value } from "@sinclair/typebox/value";
 const DEFAULT_MAX_INDEXES = 8;
 const INITIAL_SCAN_TIMEOUT_MS = 5_000;
 const MAX_SEARCH_RESULTS = 50;
+/** How old an index may be before a search triggers a rescan of the workspace. */
+const RESCAN_AFTER_MS = 2_000;
+/** How long one search waits for that rescan before serving the index it already has. */
+const RESCAN_WAIT_MS = 1_000;
 
 export const fileSearchQuerySchema = Type.Object(
     {
@@ -25,6 +29,8 @@ export interface FileSearchResult {
 interface FinderState {
     readonly finder: FileFinder;
     readonly ready: Promise<void>;
+    /** When the index was last brought up to date with the filesystem. */
+    lastScanAt: number;
 }
 
 /**
@@ -49,6 +55,14 @@ export class WorkspaceFileSearchModule {
         const FileFinderConstructor = await this.#loadFileFinder();
         const state = this.#finderFor(root, FileFinderConstructor);
         await state.ready;
+        // The background watcher can miss external changes, so an aging index is rescanned
+        // before answering; a slow rescan degrades to the index already in hand.
+        if (Date.now() - state.lastScanAt > RESCAN_AFTER_MS && !state.finder.isScanning()) {
+            state.lastScanAt = Date.now();
+            if (state.finder.scanFiles().ok) {
+                await state.finder.waitForScan(RESCAN_WAIT_MS).catch(() => undefined);
+            }
+        }
 
         const result = state.finder.fileSearch(query.query, {
             pageSize: query.limit ?? MAX_SEARCH_RESULTS,
@@ -92,6 +106,7 @@ export class WorkspaceFileSearchModule {
         const finder = created.value;
         const state: FinderState = {
             finder,
+            lastScanAt: Date.now(),
             ready: finder.waitForScan(INITIAL_SCAN_TIMEOUT_MS).then((result) => {
                 if (!result.ok) {
                     throw new WorkspaceFileSearchError(

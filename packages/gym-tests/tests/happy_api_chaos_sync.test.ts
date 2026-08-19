@@ -453,7 +453,18 @@ class ChaosWorld {
 
     static async start(gym: AgentGym, seed: string): Promise<ChaosWorld> {
         const world = new ChaosWorld(gym, makeClients(gym));
-        const bootstrap = await world.clients[0]!.getDesktopBootstrap();
+        // Chaos actions target the root workspace immediately, so its checkout must be ready
+        // before the schedule begins; the transient not_initialized answer is not under test.
+        const deadline = Date.now() + 15_000;
+        let bootstrap = await world.clients[0]!.getDesktopBootstrap();
+        while (
+            bootstrap.projects[0] !== undefined &&
+            bootstrap.projects[0].initialization.status === "initializing" &&
+            Date.now() < deadline
+        ) {
+            await new Promise((resolve) => setTimeout(resolve, 50));
+            bootstrap = await world.clients[0]!.getDesktopBootstrap();
+        }
         world.rebase(bootstrap);
         world.rootId = bootstrap.projects[0]?.id ?? "";
         if (world.rootId.length === 0) throw new Error(`Chaos seed ${seed} has no root project.`);
