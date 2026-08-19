@@ -17,7 +17,7 @@ import {
     type SessionTool,
     type SessionUsage,
 } from "@slopus/happy-providers";
-import type { Context } from "@steve.kite/stdlib";
+import { withLifetime, type Context } from "@steve.kite/stdlib";
 
 /** The provider id and model ids every gym starts with. */
 export const GYM_PROVIDER_ID = "gym";
@@ -299,7 +299,12 @@ class GymSession extends BaseSession {
         const options = this.#options;
         const tools = this.#tools;
         const id = this.id;
-        return (async function* () {
+        const controller = new AbortController();
+        const lifetime =
+            ctx.lifetime === undefined
+                ? controller.signal
+                : AbortSignal.any([ctx.lifetime, controller.signal]);
+        const iterator = (async function* () {
             const turn = await options.answer({
                 effort: request.effort,
                 instructions: request.context.instructions,
@@ -309,8 +314,9 @@ class GymSession extends BaseSession {
                 sessionId: id,
                 tools,
             });
-            for await (const event of streamTurn(ctx, turn)) yield event;
+            for await (const event of streamTurn(withLifetime(ctx, lifetime), turn)) yield event;
         })();
+        return abortWhenClosed(iterator, controller);
     }
 
     async compact(_ctx: Context, options: SessionCompactionOptions): Promise<SessionCompaction> {
@@ -324,6 +330,34 @@ class GymSession extends BaseSession {
     }
 
     destroy(): void {}
+}
+
+function abortWhenClosed(
+    iterator: AsyncGenerator<SessionEvent>,
+    controller: AbortController,
+): AsyncIterableIterator<SessionEvent> {
+    const stream: AsyncIterableIterator<SessionEvent> = {
+        [Symbol.asyncIterator]: () => stream,
+        next: async () => {
+            try {
+                const result = await iterator.next();
+                if (result.done) controller.abort();
+                return result;
+            } catch (error: unknown) {
+                controller.abort();
+                throw error;
+            }
+        },
+        return: async () => {
+            controller.abort();
+            return await iterator.return(undefined);
+        },
+        throw: async (error?: unknown) => {
+            controller.abort();
+            return await iterator.throw(error);
+        },
+    };
+    return stream;
 }
 
 /** Turn one scripted answer into the event stream a provider would really have produced. */

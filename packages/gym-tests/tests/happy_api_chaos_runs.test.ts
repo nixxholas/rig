@@ -475,7 +475,27 @@ async function executeRunAction(
             return { activeRunId: runId };
         }
         case "compact": {
-            await gym.client.compactAgent(gym.defaultSessionId, { mutationId });
+            const compacted = await gym.client.compactAgent(gym.defaultSessionId, { mutationId });
+            await gym.waitUntil(async () => {
+                const events = (
+                    await gym.client.getEvents({
+                        after: compacted.cursor,
+                        limit: 100,
+                    })
+                ).events;
+                let working = false;
+                for (const event of events) {
+                    if (
+                        event.type !== "agent.updated" ||
+                        event.payload.agentId !== gym.defaultSessionId
+                    ) {
+                        continue;
+                    }
+                    if (event.payload.changes.status === "working") working = true;
+                    if (working && event.payload.changes.status === "idle") return true;
+                }
+                return undefined;
+            }, "the explicit compaction working-to-idle transition");
             await barrier.waitFor(
                 (snapshot) =>
                     snapshot.agent.status === "idle" &&

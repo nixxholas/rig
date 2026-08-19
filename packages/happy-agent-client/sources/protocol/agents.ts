@@ -73,6 +73,13 @@ export interface AgentAbortResponse {
     cursor: EventCursor;
 }
 
+/** `POST /v0/agents/:agentId/compact` */
+export interface AgentCompactResponse {
+    agent: Agent;
+    /** The maintenance activity arrives through events from here. */
+    cursor: EventCursor;
+}
+
 /** `GET /v0/agents/:agentId/activity` — everything the agent set in motion. */
 export interface AgentActivityResponse {
     /** Full agent objects, newest first, finished ones included. */

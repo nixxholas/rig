@@ -11,6 +11,7 @@ import type {
     AbortAgentRequest,
     AgentAbortResponse,
     AgentActivityResponse,
+    AgentCompactResponse,
     AgentResponse,
     CreateAgentRequest,
     MutationOnlyRequest,
@@ -882,7 +883,7 @@ export class HappyAgentClient {
         agentId: Cuid2,
         request: MutationOnlyRequest = {},
         options: RequestOptions = {},
-    ): Promise<AgentResponse> {
+    ): Promise<AgentCompactResponse> {
         return await this.#json({
             method: "POST",
             path: `v0/agents/${encodeURIComponent(agentId)}/compact`,
