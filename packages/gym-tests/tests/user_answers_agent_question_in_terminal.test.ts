@@ -47,7 +47,7 @@ describe("a person answers the agent's question in the terminal", () => {
                 }
                 answeredResult = JSON.stringify(
                     request.context.messages.filter(
-                        (message: { readonly role: string }) => message.role === "toolResult",
+                        (message: { readonly role: string }) => message.role === "tool",
                     ),
                 );
                 return { content: [{ text: "Rewriting the table.", type: "text" }] };
@@ -69,7 +69,7 @@ describe("a person answers the agent's question in the terminal", () => {
         const answered = await gym.terminal.waitForText("Rewriting the table.", 30_000);
         expect(answered.text).not.toContain("How should the migration finish?");
         expect(answeredResult).toContain("Rewrite");
-        expect(answeredResult).toContain("answered");
+        expect(answeredResult).toContain("Answered");
 
         // The session is still usable once the question is gone.
         gym.terminal.type("Thanks.");

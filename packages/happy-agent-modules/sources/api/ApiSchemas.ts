@@ -9,6 +9,17 @@ export const apiIdSchema = Type.String({
     pattern: "^[a-z][a-z0-9]+$",
 });
 
+/**
+ * Question identifiers are provider tool-call IDs, not daemon-minted CUID2s: the durable
+ * request is keyed by the provider call ID so a recorded answer matches the exact tool result
+ * that carries it. Provider call IDs mix cases, underscores, and hyphens.
+ */
+export const questionIdSchema = Type.String({
+    minLength: 1,
+    maxLength: 96,
+    pattern: "^[A-Za-z0-9][A-Za-z0-9_-]*$",
+});
+
 export const mutationIdSchema = Type.String({ minLength: 1, maxLength: 512 });
 
 export const projectRegisterBodySchema = Type.Object(
@@ -178,7 +189,7 @@ export const abortBodySchema = Type.Object(
 export const questionAnswerBodySchema = Type.Object(
     {
         answers: Type.Record(
-            apiIdSchema,
+            questionIdSchema,
             Type.Array(Type.String({ maxLength: 100_000 }), {
                 minItems: 1,
                 maxItems: 128,

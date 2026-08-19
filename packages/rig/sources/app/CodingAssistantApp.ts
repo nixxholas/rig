@@ -5443,7 +5443,13 @@ export class CodingAssistantApp implements Component, Focusable {
             if (existing !== undefined) this.#removeUnrenderedToolEntry(existing);
             return;
         }
-        const detail = this.#formatToolResult(block);
+        // The question-and-answer exchange already happened interactively on screen, so a
+        // settled user-input row keeps its title without replaying the request text.
+        const normalizedTool = block.toolName.toLowerCase();
+        const interactiveAsk =
+            (normalizedTool === "request_user_input" || normalizedTool === "askuserquestion") &&
+            block.isError !== true;
+        const detail = interactiveAsk ? undefined : this.#formatToolResult(block);
         if (existing !== undefined) {
             existing.role = block.isError ? "error" : "tool";
             existing.title = this.#toolDisplayName(block.toolName);
@@ -5509,7 +5515,8 @@ export class CodingAssistantApp implements Component, Focusable {
             if (block.failure?.kind === "tool_unavailable") {
                 existing.text = this.#toolDisplayName(block.toolName);
             }
-            existing.detail = detail;
+            if (detail === undefined) delete existing.detail;
+            else existing.detail = detail;
             return;
         }
 
@@ -5524,7 +5531,9 @@ export class CodingAssistantApp implements Component, Focusable {
                   ? { execCommand: block.presentation }
                   : block.presentation?.type === "exploration" && block.isError !== true
                     ? { exploration: block.presentation }
-                    : { detail }),
+                    : detail === undefined
+                      ? {}
+                      : { detail }),
             ...(block.isError !== true &&
             block.presentation?.type === "file_diff" &&
             block.presentation.files.length > 0

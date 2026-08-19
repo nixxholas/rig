@@ -1831,9 +1831,11 @@ export class ApiModule implements AgentModule {
             }
             return false;
         }
-        const answer = /^\/v0\/agents\/([a-z][a-z0-9]*)\/question\/([a-z][a-z0-9]*)\/answer$/.exec(
-            url.pathname,
-        );
+        // Question IDs are provider tool-call IDs, which mix cases, underscores, and hyphens.
+        const answer =
+            /^\/v0\/agents\/([a-z][a-z0-9]*)\/question\/([A-Za-z0-9][A-Za-z0-9_-]*)\/answer$/.exec(
+                url.pathname,
+            );
         if (answer !== null && request.method === "POST") {
             const agentId = answer[1] as string;
             const questionId = answer[2] as string;
@@ -1855,20 +1857,31 @@ export class ApiModule implements AgentModule {
             ) {
                 throw invalidRequest("Every question in the batch must receive an answer.");
             }
+            const toAnswer = (values: readonly string[]) =>
+                values.length === 1 ? (values[0] as string) : { selectedOptions: [...values] };
+            // A one-question request is stored in its singular shape and only accepts the
+            // singular answer; a batched request only accepts the batch.
             const answered = await this.#withMutationId(
                 body.mutationId,
                 async () =>
-                    await this.#userInput.answer(ctx, agentId, {
-                        requestId: questionId,
-                        answers: Object.fromEntries(
-                            Object.entries(body.answers).map(([id, values]) => [
-                                id,
-                                values.length === 1
-                                    ? (values[0] as string)
-                                    : { selectedOptions: values },
-                            ]),
-                        ),
-                    }),
+                    await this.#userInput.answer(
+                        ctx,
+                        agentId,
+                        requestRow.questions === undefined
+                            ? {
+                                  requestId: questionId,
+                                  answer: toAnswer(body.answers[requestRow.id] ?? []),
+                              }
+                            : {
+                                  requestId: questionId,
+                                  answers: Object.fromEntries(
+                                      Object.entries(body.answers).map(([id, values]) => [
+                                          id,
+                                          toAnswer(values),
+                                      ]),
+                                  ),
+                              },
+                    ),
             );
             sendJson(response, 200, {
                 question: questionResource(answered, this.#events.activeRunId(agentId)),
