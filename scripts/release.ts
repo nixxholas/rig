@@ -1,5 +1,5 @@
 import { readPackageManifest } from "./release/readPackageManifest.js";
-import { assertHappyRuntimeDependencies } from "./release/assertHappyRuntimeDependencies.js";
+import { assertBundledHappyRuntimeDependencies } from "./release/assertBundledHappyRuntimeDependencies.js";
 import { assertReleaseBumpAllowed } from "./release/assertReleaseBumpAllowed.js";
 import { assertRegistryLatestMatchesManifest } from "./release/assertRegistryLatestMatchesManifest.js";
 import { resolveReleasePackage } from "./release/resolveReleasePackage.js";
@@ -79,7 +79,9 @@ async function release(): Promise<void> {
         throw new Error("The working tree must be clean before creating a release.");
     }
 
-    if (releasePackage.key === "rig") assertHappyRuntimeDependencies(initialManifest);
+    if (releasePackage.key === "rig") {
+        assertBundledHappyRuntimeDependencies(initialManifest);
+    }
     const tagsAtHead = runCommand("git", ["tag", "--points-at", "HEAD"], {
         captureOutput: true,
     }).stdout.split("\n");
