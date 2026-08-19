@@ -1,6 +1,6 @@
 {
     "name": "@slopus/ghostty-web",
-    "version": "0.1.1",
+    "version": "0.1.2",
     "description": "Client/server protocol for efficiently remoting a Ghostty-backed terminal to web and native clients.",
     "license": "MIT",
     "files": [
