@@ -188,6 +188,15 @@ Use gym tests for behavior spanning terminal input or rendering, inference, tool
 
 Run the suite with `pnpm test:gym`. Read [`packages/gym-tests/README.md`](packages/gym-tests/README.md) before writing or debugging a gym test; it is the source of truth for architecture, APIs, inference scripts, fixtures, terminal snapshots, scroll tracking, examples, and targeted test commands.
 
+The complete Happy Agent API gym, `pnpm test:gym:api`, is an exhaustive gate with
+658 scenarios, 120 deterministic chaos seeds, and 9,640 chaos actions. It takes
+about 45 minutes on the unprivileged Linux runner. Do not run it as routine
+verification or automatically on every push or pull request. Run targeted API
+gym files while developing. Run the complete gate only when a human explicitly
+requests it or when closing a release or API-contract milestone. In GitHub
+Actions, dispatch `Verify Happy Agent API` manually and enable
+`Run the exhaustive API gym`.
+
 ## User-facing text
 
 All strings displayed to users must be human-readable English. Prefer natural, human-like labels and messages over raw identifiers, internal enum values, file names, protocol names, or placeholder text. Convert technical values into clear display text before rendering them in the UI or CLI.

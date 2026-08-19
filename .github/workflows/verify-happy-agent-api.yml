@@ -28,6 +28,12 @@ on:
             - "pnpm-lock.yaml"
             - "pnpm-workspace.yaml"
     workflow_dispatch:
+        inputs:
+            exhaustive:
+                description: Run the exhaustive API gym (about 45 minutes)
+                required: true
+                default: false
+                type: boolean
 
 permissions:
     contents: read
@@ -90,4 +96,5 @@ jobs:
                     --retry=0
 
             - name: Run the complete API gym
+              if: ${{ github.event_name == 'workflow_dispatch' && inputs.exhaustive }}
               run: pnpm test:gym:api
