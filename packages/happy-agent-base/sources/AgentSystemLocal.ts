@@ -331,7 +331,12 @@ export class AgentSystemLocal<
             if (!Value.Check(cuid2Schema, agentId)) {
                 throw new Error("The agent ID must be a cuid2 identity.");
             }
-            await this.#waitForTransition(ctx, agentId);
+            // Preserve synchronous ownership of caller-supplied config in the ordinary case.
+            // Awaiting an already-settled async helper would give the caller a microtask in which
+            // it could mutate the object before we copy it below.
+            if (this.#transitions.has(agentId)) {
+                await this.#waitForTransition(ctx, agentId);
+            }
             this.#assertNotDeletedInTransaction(ctx, agentId);
             if (!Value.Check(agentConfigSchema, config)) {
                 throw new Error(`The configuration for agent "${agentId}" is not valid.`);
