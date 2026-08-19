@@ -43,11 +43,7 @@ export const genericNoticeSchema = Type.Object(
         kind: Type.Literal("notice"),
         title: Type.String({ maxLength: SERVICE_NOTICE_MESSAGE_MAX_LENGTH, minLength: 1 }),
         details: Type.String({ maxLength: SERVICE_NOTICE_TEXT_MAX_LENGTH, minLength: 1 }),
-        level: Type.Union([
-            Type.Literal("info"),
-            Type.Literal("warning"),
-            Type.Literal("error"),
-        ]),
+        level: Type.Union([Type.Literal("info"), Type.Literal("warning"), Type.Literal("error")]),
         /**
          * A stable machine code for notices a client must react to beyond rendering. It exists so a
          * client keys that behavior to a durable identifier rather than to the human-facing title,
@@ -61,7 +57,10 @@ export const genericNoticeSchema = Type.Object(
 );
 export type GenericNotice = Static<typeof genericNoticeSchema>;
 
-export const serviceNoticeSchema = Type.Union([computePreparationNoticeSchema, genericNoticeSchema]);
+export const serviceNoticeSchema = Type.Union([
+    computePreparationNoticeSchema,
+    genericNoticeSchema,
+]);
 export type ServiceNotice = Static<typeof serviceNoticeSchema>;
 
 /**

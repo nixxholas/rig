@@ -187,7 +187,7 @@ export class SecretsModule implements AgentModule {
         const normalizedInput = normalizeRegistrationInput(input);
 
         return await this.#runTransaction(ctx, "register", async (txCtx) => {
-            const id = normalizedInput.id ?? (this.#newSecretId());
+            const id = normalizedInput.id ?? this.#newSecretId();
             const registration = this.#normalizeRegistration({ ...normalizedInput, id });
             const eventId = this.#newEventId();
             const at = this.#now();

@@ -23,12 +23,34 @@ const fixtures = {
 
 describe("files API matrix: search and tree", () => {
     it.each([
-        ["F001", "README", ["README.md"]],
-        ["F002", "readme", ["README.md"]],
-        ["F003", ".TS", ["src/Alpha.ts", "src/beta.test.ts"]],
+        ["F001", "README", ["README.md", "src/beta.test.ts"]],
+        ["F002", "readme", ["README.md", "src/beta.test.ts"]],
+        [
+            "F003",
+            ".TS",
+            [
+                "src/Alpha.ts",
+                "src/beta.test.ts",
+                "empty/zero.txt",
+                "assets/data.bin",
+                "docs/notes.md",
+                "README.md",
+            ],
+        ],
         ["F004", "does-not-exist", []],
-        ["F005", "a", ["assets/data.bin", "README.md", "src/Alpha.ts", "src/beta.test.ts"]],
-        ["F006", "notes", ["docs/notes.md"]],
+        [
+            "F005",
+            "a",
+            [
+                "README.md",
+                "docs/notes.md",
+                "src/Alpha.ts",
+                "src/beta.test.ts",
+                "assets/data.bin",
+                "empty/zero.txt",
+            ],
+        ],
+        ["F006", "notes", ["docs/notes.md", "src/beta.test.ts"]],
     ] as const)("%s searches filenames with its matching rule", async (id, query, expected) => {
         const gym = await fresh();
         const result = await gym.client.searchFiles(await root(gym), {
@@ -42,7 +64,7 @@ describe("files API matrix: search and tree", () => {
     it("[F007] enforces the search limit while preserving order", async () => {
         const gym = await fresh();
         const result = await gym.client.searchFiles(await root(gym), { limit: 2, query: "a" });
-        expect(result.files.map((file) => file.path)).toEqual(["assets/data.bin", "README.md"]);
+        expect(result.files.map((file) => file.path)).toEqual(["README.md", "docs/notes.md"]);
     });
 
     it("[F008] returns the root tree in deterministic order", async () => {

@@ -76,18 +76,8 @@ export function parseConfigTomlWithUnknownSettings(source: string): ParsedConfig
         }
     }
 
-    const defaults = readKnownTable(
-        document.defaults,
-        "defaults",
-        defaultsSchema,
-        unknownSettings,
-    );
-    const settings = readKnownTable(
-        document.settings,
-        "settings",
-        settingsSchema,
-        unknownSettings,
-    );
+    const defaults = readKnownTable(document.defaults, "defaults", defaultsSchema, unknownSettings);
+    const settings = readKnownTable(document.settings, "settings", settingsSchema, unknownSettings);
     const theme = readKnownTable(document.theme, "theme", themeSchema, unknownSettings);
 
     const values: PartialRigConfig = {};
@@ -97,12 +87,9 @@ export function parseConfigTomlWithUnknownSettings(source: string): ParsedConfig
     return { unknownSettings, values };
 }
 
-function readKnownTable<T extends typeof defaultsSchema | typeof settingsSchema | typeof themeSchema>(
-    value: unknown,
-    path: string,
-    schema: T,
-    unknownSettings: string[],
-): Static<T> | undefined {
+function readKnownTable<
+    T extends typeof defaultsSchema | typeof settingsSchema | typeof themeSchema,
+>(value: unknown, path: string, schema: T, unknownSettings: string[]): Static<T> | undefined {
     if (value === undefined) return undefined;
     if (!Value.Check(tableSchema, value)) throw new Error(`${path} must be a TOML table.`);
 

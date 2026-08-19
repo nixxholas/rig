@@ -297,11 +297,7 @@ export class TitlesModule implements AgentModule<AnyAgentTool> {
      * The folder and the branch take the same name: they are the same piece of work under two
      * filesystems, and a folder called one thing on a branch called another is only confusing.
      */
-    async #renameWorkspace(
-        ctx: Context,
-        current: Workspace,
-        slug: string,
-    ): Promise<Workspace> {
+    async #renameWorkspace(ctx: Context, current: Workspace, slug: string): Promise<Workspace> {
         return await this.#workspaces.inheritName(ctx, {
             workspaceId: current.id,
             name: this.#workspaces.nameWithPreservedPrefix(current.name, slug),

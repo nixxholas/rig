@@ -48,9 +48,9 @@ describe("AutoReviewComputeModule", () => {
         const module = new AutoReviewComputeModule(world.compute, context);
         const hooks = await resolveModuleHooks(context, module);
 
-        expect((await hooks.tools?.(context, scope("anthropic/opus-5")))?.map((t) => t.name)).toEqual(
-            ["Bash", "Read", "Glob", "Grep", "BashInput"],
-        );
+        expect(
+            (await hooks.tools?.(context, scope("anthropic/opus-5")))?.map((t) => t.name),
+        ).toEqual(["Bash", "Read", "Glob", "Grep", "BashInput"]);
         expect((await hooks.tools?.(context, scope("xai/grok-4.5")))?.map((t) => t.name)).toEqual([
             "run_terminal_command",
             "read_file",

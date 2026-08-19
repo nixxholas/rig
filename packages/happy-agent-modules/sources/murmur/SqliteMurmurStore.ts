@@ -52,7 +52,10 @@ export class SqliteMurmurStore implements MurmurStore {
         return await this.scan(prefix, { limit: MAXIMUM_STORE_SCAN_ITEMS });
     }
 
-    async scan(prefix: string, options: StoreScanOptions): Promise<ReadonlyMap<string, Uint8Array>> {
+    async scan(
+        prefix: string,
+        options: StoreScanOptions,
+    ): Promise<ReadonlyMap<string, Uint8Array>> {
         this.#requireOpen();
         return await this.#page(this.#ctx, prefix, options);
     }

@@ -61,7 +61,11 @@ describe("ModelSwitchModule lifecycle", () => {
 
         try {
             expect(hooks?.modelChanged).toBeTypeOf("function");
-            const result = await hooks?.modelChanged?.(ctx.context, modelSwitchScope(), modelChange());
+            const result = await hooks?.modelChanged?.(
+                ctx.context,
+                modelSwitchScope(),
+                modelChange(),
+            );
             const text = textFromNotice(result);
 
             expect(text).toContain("Fast OpenAI on scripted");
@@ -74,9 +78,13 @@ describe("ModelSwitchModule lifecycle", () => {
     it("falls back to model IDs when the collection has no matching route", async () => {
         const database = moduleDatabase([], "model-switch-unlabeled");
         try {
-            const result = await modelSwitchNoticeFromHook(new ModelSwitchModule(), database.context, {
-                models: [model("other-provider", "openai/gpt-5.6-sol", "Wrong provider")],
-            });
+            const result = await modelSwitchNoticeFromHook(
+                new ModelSwitchModule(),
+                database.context,
+                {
+                    models: [model("other-provider", "openai/gpt-5.6-sol", "Wrong provider")],
+                },
+            );
 
             const text = textFromNotice(result);
             expect(text).toContain("openai/gpt-5.6-sol on scripted");

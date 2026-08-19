@@ -2,10 +2,7 @@ import { basename } from "node:path";
 
 import { spawn } from "@lydell/node-pty";
 
-import type {
-    TerminalProcess,
-    TerminalProcessFactory,
-} from "../TerminalProcess.js";
+import type { TerminalProcess, TerminalProcessFactory } from "../TerminalProcess.js";
 
 /** A real pseudo-terminal on this machine, with this machine's environment and filesystem. */
 export function createHostTerminalProcessFactory(

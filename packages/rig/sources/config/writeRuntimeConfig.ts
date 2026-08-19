@@ -45,8 +45,7 @@ export async function writeRuntimeConfigInsideLock(
                       ...(config.settings.compactCompletedTurns === undefined
                           ? {}
                           : {
-                                compact_completed_turns:
-                                    config.settings.compactCompletedTurns,
+                                compact_completed_turns: config.settings.compactCompletedTurns,
                             }),
                       ...(config.settings.completionChime === undefined
                           ? {}

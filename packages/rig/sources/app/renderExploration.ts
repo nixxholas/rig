@@ -1,9 +1,6 @@
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 
-import type {
-    ExplorationOperation,
-    ExplorationToolCallPresentation,
-} from "../protocol/index.js";
+import type { ExplorationOperation, ExplorationToolCallPresentation } from "../protocol/index.js";
 
 const RESET = "\x1b[0m";
 const BOLD = "\x1b[1m";

@@ -123,9 +123,9 @@ describe("MurmurService", () => {
     it("issues an invitation only once a local person is bound", async () => {
         const fixture = await createFixture("murmur-service-invitation");
         try {
-            await expect(
-                fixture.service.createInvitation(fixture.test.context),
-            ).rejects.toThrow("Choose a local profile before using sharing.");
+            await expect(fixture.service.createInvitation(fixture.test.context)).rejects.toThrow(
+                "Choose a local profile before using sharing.",
+            );
 
             const profile = await createLocalProfile(fixture);
             await fixture.service.bindProfile(fixture.test.context, profile.id);
@@ -208,10 +208,7 @@ describe("MurmurService", () => {
             await fixture.service.removeContact(ctx, encodeIdentity(REMOTE));
             expect((await fixture.service.snapshot(ctx)).contacts).toEqual([]);
 
-            const outgoing = await fixture.service.requestContact(
-                ctx,
-                encodeIdentity(INVITATION),
-            );
+            const outgoing = await fixture.service.requestContact(ctx, encodeIdentity(INVITATION));
             expect(outgoing).toEqual({
                 id: encodeIdentity(SESSION),
                 identity: encodeIdentity(REMOTE),

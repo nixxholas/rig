@@ -111,9 +111,9 @@ describe("SecretsModule", () => {
 
             // Another agent never sees it: the acting agent ID is the whole of the policy.
             expect(await module.reference(database.context, "agent-b", "secret-1")).toBeUndefined();
-            await expect(
-                module.list(database.context, "agent-b", {}),
-            ).resolves.toMatchObject({ secrets: [] });
+            await expect(module.list(database.context, "agent-b", {})).resolves.toMatchObject({
+                secrets: [],
+            });
             await expect(module.remove(database.context, "agent-b", "secret-1")).resolves.toBe(
                 false,
             );

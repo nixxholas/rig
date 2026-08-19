@@ -32,17 +32,29 @@ describe("the public files and Git API", () => {
 
         const search = await gym.client.searchFiles(workspaceId, {
             limit: 10,
-            query: ".TS",
+            query: "alpha",
         });
-        expect(search.files.map((file) => file.path)).toEqual([
-            "src/alpha.ts",
-            "src/beta.ts",
-            "src/deep/gamma.test.ts",
-        ]);
-        expect(search.files[0]).toMatchObject({
+        expect(search.files[0]).toEqual({
             fileName: "alpha.ts",
             path: "src/alpha.ts",
         });
+
+        const fuzzySearch = await gym.client.searchFiles(workspaceId, {
+            limit: 10,
+            query: "gmtest",
+        });
+        expect(fuzzySearch.files).toContainEqual({
+            fileName: "gamma.test.ts",
+            path: "src/deep/gamma.test.ts",
+        });
+
+        const emptySearch = await gym.client.searchFiles(workspaceId, {
+            limit: 10,
+            query: "",
+        });
+        expect(emptySearch.files.map((file) => file.path)).toEqual(
+            expect.arrayContaining(["README.md", "src/alpha.ts"]),
+        );
 
         const firstPage = await gym.client.getFileTree(workspaceId, {
             limit: 1,
@@ -124,6 +136,60 @@ describe("the public files and Git API", () => {
             code: "too_large",
             status: 413,
         });
+    });
+
+    it("keeps fuzzy indexes scoped to the selected child workspace", async () => {
+        const gym = await createAgentGym({
+            files: {
+                "root-only.ts": "export const rootOnly = true;\n",
+            },
+        });
+        running.add(gym);
+        const rootId = await rootWorkspaceId(gym);
+        await gym.waitUntil(async () => {
+            try {
+                const workspace = (await gym.client.getWorkspace(rootId)).workspace;
+                return workspace.initialization.status === "ready" ? workspace : undefined;
+            } catch (error: unknown) {
+                if ((error as { readonly status?: unknown }).status === 409) return undefined;
+                throw error;
+            }
+        }, "the root workspace to initialize");
+        const created = await gym.client.createWorkspace({
+            agentId: gym.defaultSessionId,
+            mutationId: "files-child-workspace",
+            name: "files-child",
+            parentId: rootId,
+        });
+        const child = await gym.waitUntil(async () => {
+            try {
+                const workspace = (await gym.client.getWorkspace(created.workspace.id)).workspace;
+                return workspace.initialization.status === "ready" ? workspace : undefined;
+            } catch (error: unknown) {
+                if ((error as { readonly status?: unknown }).status === 409) return undefined;
+                throw error;
+            }
+        }, "the child workspace to initialize");
+        if (child.compute.type !== "host") throw new Error("The child has no host path.");
+        await mkdir(join(child.compute.path, "src"), { recursive: true });
+        await writeFs(
+            join(child.compute.path, "src", "ChildComposer.tsx"),
+            "export const childComposer = true;\n",
+            "utf8",
+        );
+
+        const childSearch = await gym.client.searchFiles(child.id, {
+            query: "chldcomp",
+        });
+        expect(childSearch.files).toContainEqual({
+            fileName: "ChildComposer.tsx",
+            path: "src/ChildComposer.tsx",
+        });
+
+        const rootSearch = await gym.client.searchFiles(rootId, {
+            query: "chldcomp",
+        });
+        expect(rootSearch.files.map((file) => file.path)).not.toContain("src/ChildComposer.tsx");
     });
 
     it("reads Git revisions, publishes live snapshots, and replaces the watch set", async () => {

@@ -29,18 +29,18 @@ describe("murmur binding", () => {
             ]);
             await expect(readMurmurBinding(test.context)).resolves.toBeUndefined();
 
-            await expect(
-                bindMurmurProfile(test.context, PROFILE, IDENTITY, 1_000),
-            ).resolves.toBe("created");
+            await expect(bindMurmurProfile(test.context, PROFILE, IDENTITY, 1_000)).resolves.toBe(
+                "created",
+            );
             await expect(readMurmurBinding(test.context)).resolves.toEqual({
                 createdAt: 1_000,
                 murmurIdentity: IDENTITY,
                 profileId: PROFILE,
             });
 
-            await expect(
-                bindMurmurProfile(test.context, PROFILE, IDENTITY, 2_000),
-            ).resolves.toBe("unchanged");
+            await expect(bindMurmurProfile(test.context, PROFILE, IDENTITY, 2_000)).resolves.toBe(
+                "unchanged",
+            );
             await expect(readMurmurBinding(test.context)).resolves.toMatchObject({
                 createdAt: 1_000,
             });

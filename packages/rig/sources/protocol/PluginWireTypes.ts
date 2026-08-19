@@ -139,12 +139,6 @@ export interface HappyComputePreparationEvent {
     phase: HappyComputePreparationPhase;
     provider: string;
     startedAt?: number;
-    state:
-        | "provisioning"
-        | "ready"
-        | "unprovisioned"
-        | "unavailable"
-        | "failed"
-        | "stopped";
+    state: "provisioning" | "ready" | "unprovisioned" | "unavailable" | "failed" | "stopped";
     type: "compute_preparation";
 }

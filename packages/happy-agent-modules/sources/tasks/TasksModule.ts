@@ -349,11 +349,7 @@ export class TasksModule implements AgentModule {
             return {
                 result: task,
                 tasks: tasks.map((candidate) => (candidate.id === taskId ? task : candidate)),
-                event: this.#event(
-                    { type: "task_completed", agentId, task },
-                    eventId,
-                    at,
-                ),
+                event: this.#event({ type: "task_completed", agentId, task }, eventId, at),
             };
         });
         return change.result;
@@ -384,11 +380,7 @@ export class TasksModule implements AgentModule {
             return {
                 result: true,
                 tasks: normalized,
-                event: this.#event(
-                    { type: "task_removed", agentId, taskId },
-                    eventId,
-                    at,
-                ),
+                event: this.#event({ type: "task_removed", agentId, taskId }, eventId, at),
             };
         });
         return change.result;

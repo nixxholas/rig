@@ -18,17 +18,17 @@ nobody can attach to.
 The module has no model-facing tools. A terminal is a place a person works, not a capability an
 agent calls, and everything below is a host operation.
 
-| Method                                                    | What it does                                                          |
-| --------------------------------------------------------- | --------------------------------------------------------------------- |
-| `create(ctx, agentId, scope, input)`                      | Opens one terminal in the folder that scope names.                    |
-| `list(ctx, agentId, scope)`                               | Every terminal open on that folder, running and finished.             |
-| `get(ctx, agentId, scope, terminalId)`                    | One terminal's record.                                                |
-| `session(ctx, agentId, scope, terminalId)`                | The live terminal, for a caller about to attach a stream.             |
-| `attach(ctx, agentId, scope, terminalId, stream)`         | Attaches one duplex stream, returning the call that detaches it.      |
-| `resize(ctx, agentId, scope, terminalId, input)`          | Resizes the process, the canonical emulator, and every replica.       |
-| `stop(ctx, agentId, scope, terminalId)`                   | Ends the process. The record stays, holding the exit code.            |
-| `closeScope(scope)` / `closeProject(projectId)`           | Ends a folder's terminals when the folder itself goes away.           |
-| `close()`                                                 | Ends everything and opens nothing more.                               |
+| Method                                            | What it does                                                     |
+| ------------------------------------------------- | ---------------------------------------------------------------- |
+| `create(ctx, agentId, scope, input)`              | Opens one terminal in the folder that scope names.               |
+| `list(ctx, agentId, scope)`                       | Every terminal open on that folder, running and finished.        |
+| `get(ctx, agentId, scope, terminalId)`            | One terminal's record.                                           |
+| `session(ctx, agentId, scope, terminalId)`        | The live terminal, for a caller about to attach a stream.        |
+| `attach(ctx, agentId, scope, terminalId, stream)` | Attaches one duplex stream, returning the call that detaches it. |
+| `resize(ctx, agentId, scope, terminalId, input)`  | Resizes the process, the canonical emulator, and every replica.  |
+| `stop(ctx, agentId, scope, terminalId)`           | Ends the process. The record stays, holding the exit code.       |
+| `closeScope(scope)` / `closeProject(projectId)`   | Ends a folder's terminals when the folder itself goes away.      |
+| `close()`                                         | Ends everything and opens nothing more.                          |
 
 A scope is `{ projectId }` or `{ projectId, workspaceId }`. A project and its workspaces are
 separate collections, because they are separate folders.
@@ -68,13 +68,13 @@ const terminals = new TerminalsModule(projects, workspaces);
 
 ## Bounds
 
-| Thing                        | Limit                            |
-| ---------------------------- | -------------------------------- |
-| Columns                      | 1–500, 80 by default             |
-| Rows                         | 1–200, 24 by default             |
-| Scrollback rows              | 0–100,000, 10,000 by default     |
-| Terminals per folder         | 32 (`MAX_TERMINALS_PER_SCOPE`)   |
-| Command                      | 8,192 characters                 |
+| Thing                | Limit                          |
+| -------------------- | ------------------------------ |
+| Columns              | 1–500, 80 by default           |
+| Rows                 | 1–200, 24 by default           |
+| Scrollback rows      | 0–100,000, 10,000 by default   |
+| Terminals per folder | 32 (`MAX_TERMINALS_PER_SCOPE`) |
+| Command              | 8,192 characters               |
 
 Reaching the terminal limit discards a terminal that has already finished. When every terminal is
 still running the limit is real, and the request is refused rather than quietly killing someone's

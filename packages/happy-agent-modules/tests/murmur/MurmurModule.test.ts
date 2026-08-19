@@ -17,10 +17,7 @@ import {
 } from "../../sources/murmur/MurmurDatabase.js";
 import { MurmurModule } from "../../sources/murmur/MurmurModule.js";
 import type { MurmurClientFacade } from "../../sources/murmur/MurmurService.js";
-import {
-    murmurSnapshotSchema,
-    type MurmurChangedEvent,
-} from "../../sources/murmur/MurmurTypes.js";
+import { murmurSnapshotSchema, type MurmurChangedEvent } from "../../sources/murmur/MurmurTypes.js";
 import { ProfileModule } from "../../sources/profile/ProfileModule.js";
 import { moduleDatabase } from "../support/moduleDatabase.js";
 import { FakeMurmurClient, encodeIdentity, identityBytes } from "./fakeMurmurClient.js";

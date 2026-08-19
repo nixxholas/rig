@@ -636,7 +636,7 @@ Fields:
 - `worktreeSupport` — `"supported"`, `"unsupported"`, or `"unknown"`; whether child workspaces
   can be created as Git worktrees. `worktreeUnsupportedReason` accompanies `"unsupported"`.
 - `remoteSource` — where a cloned project came from: `{ "kind": "github", "repository":
-  "owner/name" }` or `{ "kind": "git", "url": "https://..." }`; `null` for a registered local
+"owner/name" }` or `{ "kind": "git", "url": "https://..." }`; `null` for a registered local
   folder.
 - `avatar` — the project picture, or `null`. An `"image"` avatar carries a `thumbhash` — a
   ThumbHash placeholder the client renders before fetching the image bytes from
@@ -698,7 +698,7 @@ Request:
 
 - `name` — the folder name for the clone.
 - `source` — `{ "kind": "github", "repository": "owner/name" }` or `{ "kind": "git", "url":
-  "https://..." }`. Only plain HTTPS remotes without embedded credentials are accepted.
+"https://..." }`. Only plain HTTPS remotes without embedded credentials are accepted.
 - `secret` — optional; names the stored credential kind to clone with (currently
   `{ "kind": "github" }`).
 - `projectId` — optional client-supplied ID, as in registration.
@@ -1055,9 +1055,12 @@ files are read through the root workspace's ID.
 
 #### `GET /v0/workspaces/:workspaceId/files`
 
-Filename search: case-insensitive substring match over relative paths.
+Ranked fuzzy search over relative file paths in the selected workspace. Results are ordered from
+best match to weakest match.
 
-Query parameters: `query` (required), `limit` (optional).
+Query parameters: `query` (required, but may be empty), `limit` (optional, `1`–`50`, default `50`).
+An empty query returns the first ranked workspace files, which lets a picker show suggestions for
+a bare `@`.
 
 Response — `200`: `{ "files": [ { "path": "sources/main.ts", "fileName": "main.ts" } ] }`
 

@@ -280,9 +280,10 @@ describe("SystemPromptModule", () => {
         ).rejects.toThrow("System prompt available models exceed the configured UTF-8 byte bound");
 
         await expect(
-            (
-                await moduleWithCatalog([catalogModel("bad\nname", "id", "provider")])
-            ).instructions(contextWithEnvironment(), scope),
+            (await moduleWithCatalog([catalogModel("bad\nname", "id", "provider")])).instructions(
+                contextWithEnvironment(),
+                scope,
+            ),
         ).rejects.toThrow("System prompt available models are invalid");
     });
 

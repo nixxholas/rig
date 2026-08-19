@@ -61,9 +61,9 @@ because renaming either would move it out from under agents already working ther
 
 `new TitlesModule(config, workspaces)`.
 
-| Module                                      | Why                                                                        |
-| ------------------------------------------- | -------------------------------------------------------------------------- |
-| [`ConfigModule`](../config/README.md)       | The accounts a name is written on, and the catalog the cheapest model comes from. |
+| Module                                        | Why                                                                                                          |
+| --------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| [`ConfigModule`](../config/README.md)         | The accounts a name is written on, and the catalog the cheapest model comes from.                            |
 | [`WorkspacesModule`](../workspaces/README.md) | The catalog a named workspace is renamed through, and what knows how a workspace's own name is put together. |
 
 Nothing else is passed in. One name may take ten seconds, and that is a constant here rather than

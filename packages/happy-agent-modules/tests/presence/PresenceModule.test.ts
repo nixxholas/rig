@@ -234,12 +234,9 @@ current = "nowhere"
             });
 
             const changes: unknown[] = [];
-            const unsubscribe = await module.subscribeUserInput(
-                database.context,
-                (_ctx, state) => {
-                    changes.push(state);
-                },
-            );
+            const unsubscribe = await module.subscribeUserInput(database.context, (_ctx, state) => {
+                changes.push(state);
+            });
             expect(changes).toHaveLength(1);
 
             await module.setPresence(database.context, { status: "online" });

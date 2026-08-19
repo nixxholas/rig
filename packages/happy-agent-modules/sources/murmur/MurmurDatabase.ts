@@ -84,10 +84,7 @@ export async function bindMurmurProfile(
             if (current.profileId !== profileId) {
                 throw new Error("This Murmur identity is already bound to another profile.");
             }
-            if (
-                current.murmurIdentity !== null &&
-                current.murmurIdentity !== murmurIdentity
-            ) {
+            if (current.murmurIdentity !== null && current.murmurIdentity !== murmurIdentity) {
                 throw new Error("The stored Murmur identity does not match this sharing profile.");
             }
             if (current.murmurIdentity === null) {

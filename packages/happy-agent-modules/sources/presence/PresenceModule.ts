@@ -10,11 +10,7 @@ import { afterCommit, type Context } from "@steve.kite/stdlib";
 
 import type { ConfigModule } from "../config/index.js";
 
-import {
-    BUILT_IN_PRESENCES,
-    ONLINE_PRESENCE_ID,
-    isBuiltInPresenceId,
-} from "./PresenceCatalog.js";
+import { BUILT_IN_PRESENCES, ONLINE_PRESENCE_ID, isBuiltInPresenceId } from "./PresenceCatalog.js";
 import { MAX_PRESENCE_DEFINITIONS, readConfiguredPresence } from "./PresenceConfiguration.js";
 import { createPresenceDatabase, presenceMigrations } from "./PresenceDatabase.js";
 import {
@@ -98,9 +94,7 @@ export class PresenceModule implements AgentModule, PresenceReader {
         this.#store = createPresenceDatabase();
         this.#configuredCatalog = cloneCatalog(configured.catalog);
         this.#initialState =
-            configured.initialState === undefined
-                ? undefined
-                : cloneValue(configured.initialState);
+            configured.initialState === undefined ? undefined : cloneValue(configured.initialState);
     }
 
     readonly beforeStart = async (ctx: Context): Promise<AgentModuleHooks> => {
@@ -443,10 +437,7 @@ export class PresenceModule implements AgentModule, PresenceReader {
             if (event !== undefined) {
                 const userInputState = await this.#readUserInputState(txCtx, at);
                 for (const listener of this.#transactionalListeners) {
-                    await invokeVoid(
-                        listener(txCtx, event),
-                        "Presence transactional listener",
-                    );
+                    await invokeVoid(listener(txCtx, event), "Presence transactional listener");
                 }
                 afterCommit(txCtx, (postCommitCtx) =>
                     this.#notifyPostCommit(postCommitCtx, event, userInputState),
@@ -555,10 +546,14 @@ export class PresenceModule implements AgentModule, PresenceReader {
  */
 function reportPostCommitFailure(ctx: Context, event: PresenceEvent, error: unknown): void {
     try {
-        ctx.log.warn("A presence listener failed after the change was saved.", {
-            eventId: event.eventId,
-            type: event.type,
-        }, error);
+        ctx.log.warn(
+            "A presence listener failed after the change was saved.",
+            {
+                eventId: event.eventId,
+                type: event.type,
+            },
+            error,
+        );
     } catch {
         // Reporting is advisory and must not turn a committed mutation into a failure.
     }

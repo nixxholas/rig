@@ -217,11 +217,7 @@ export class ProjectMutations {
      * The module transaction must commit before a listener reads the changed row. When the caller
      * supplied its own post-commit boundary, delivery then waits for that boundary as well.
      */
-    async observeMutation(
-        callerCtx: Context,
-        txCtx: Context,
-        event: ProjectEvent,
-    ): Promise<void> {
+    async observeMutation(callerCtx: Context, txCtx: Context, event: ProjectEvent): Promise<void> {
         if (callerCtx === txCtx) {
             await this.observe(txCtx, event);
             return;

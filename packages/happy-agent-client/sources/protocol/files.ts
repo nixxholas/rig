@@ -5,7 +5,7 @@
  * symlinks escaping the root are rejected by the daemon.
  */
 
-/** One hit from the filename search. */
+/** One result from ranked fuzzy workspace-file search. */
 export interface FileMatch {
     path: string;
     fileName: string;
@@ -13,12 +13,15 @@ export interface FileMatch {
 
 /** `GET /v0/workspaces/:workspaceId/files` query parameters. */
 export interface FileSearchQuery {
+    /** A fuzzy relative-path query. May be empty to list initial picker suggestions. */
     query: string;
+    /** Maximum results, from 1 through 50. The daemon defaults to 50. */
     limit?: number;
 }
 
 /** `GET /v0/workspaces/:workspaceId/files` */
 export interface FileSearchResponse {
+    /** Best fuzzy match first. */
     files: FileMatch[];
 }
 

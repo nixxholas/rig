@@ -538,12 +538,9 @@ current = "offline"
         await database.ready;
         try {
             const snapshots: unknown[] = [];
-            const unsubscribe = await module.subscribeUserInput(
-                database.context,
-                (_ctx, state) => {
-                    snapshots.push(state);
-                },
-            );
+            const unsubscribe = await module.subscribeUserInput(database.context, (_ctx, state) => {
+                snapshots.push(state);
+            });
             expect(snapshots).toEqual([undefined]);
             await module.setPresence(database.context, { status: "away" });
             await vi.waitFor(() =>
@@ -564,9 +561,9 @@ current = "offline"
             const failing = vi.fn(() => {
                 throw new Error("subscriber failed");
             });
-            await expect(
-                module.subscribeUserInput(database.context, failing),
-            ).rejects.toThrow("subscriber failed");
+            await expect(module.subscribeUserInput(database.context, failing)).rejects.toThrow(
+                "subscriber failed",
+            );
             await module.setPresence(database.context, { status: "dnd" });
             expect(failing).toHaveBeenCalledOnce();
         } finally {

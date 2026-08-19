@@ -136,7 +136,9 @@ describe("GoalModule", () => {
             ).resolves.toMatchObject({ objective: "second", status: "active" });
 
             await test.module.clearGoal(test.database.context, "agent-one");
-            await expect(test.module.goal(test.database.context, "agent-one")).resolves.toBeUndefined();
+            await expect(
+                test.module.goal(test.database.context, "agent-one"),
+            ).resolves.toBeUndefined();
             await expect(
                 test.module.goal(test.database.context, "agent-two"),
             ).resolves.toMatchObject({ objective: "second" });

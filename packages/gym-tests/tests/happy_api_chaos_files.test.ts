@@ -797,15 +797,30 @@ async function applySearch(
     workspaceId: string,
     model: FileModel,
 ): Promise<void> {
-    const response = await gym.client.searchFiles(workspaceId, {
-        limit: action.limit,
-        query: action.query,
-    });
     const expected = [...model.files.keys()]
         .filter((path) => path.toLowerCase().includes(action.query.toLowerCase()))
-        .sort((left, right) => left.localeCompare(right))
-        .slice(0, action.limit);
-    expect(response.files.map((file) => file.path)).toEqual(expected);
+        .sort((left, right) => left.localeCompare(right));
+    const response =
+        expected.length > action.limit
+            ? await gym.client.searchFiles(workspaceId, {
+                  limit: action.limit,
+                  query: action.query,
+              })
+            : await gym.waitUntil(
+                  async () => {
+                      const candidate = await gym.client.searchFiles(workspaceId, {
+                          limit: action.limit,
+                          query: action.query,
+                      });
+                      const paths = candidate.files.map((file) => file.path);
+                      return expected.every((path) => paths.includes(path)) ? candidate : undefined;
+                  },
+                  `fuzzy file search ${JSON.stringify(action.query)} to include direct matches`,
+              );
+    const paths = response.files.map((file) => file.path);
+    expect(paths).toHaveLength(new Set(paths).size);
+    expect(paths.length).toBeLessThanOrEqual(action.limit);
+    for (const path of paths) expect(model.files.has(path)).toBe(true);
 }
 
 async function applyRevision(

@@ -40,9 +40,10 @@ interface OpenMurmur {
  * identity on a relay is not something an installation should acquire because a caller passed a
  * flag.
  */
-export class MurmurModule<Database extends AgentDatabase = AgentDatabase>
-    implements AgentModule<never, Database>
-{
+export class MurmurModule<Database extends AgentDatabase = AgentDatabase> implements AgentModule<
+    never,
+    Database
+> {
     readonly name = "murmur";
     readonly migrations: readonly AgentModuleMigration<Database>[];
     readonly #config: ConfigModule;

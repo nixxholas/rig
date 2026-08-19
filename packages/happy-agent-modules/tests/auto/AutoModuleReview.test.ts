@@ -256,10 +256,9 @@ describe("AutoModule reviewer", () => {
     it("refuses to start when the configuration enables no model to review with", async () => {
         const context = createRootContext().named("auto-review-no-models");
         const emptyCatalog = await autoWorld();
-        const config = await ConfigModule.load(
-            emptyCatalog.config.configuration.paths.happyHome,
-            { inference: { models: [], providers: new AgentProviders() } },
-        );
+        const config = await ConfigModule.load(emptyCatalog.config.configuration.paths.happyHome, {
+            inference: { models: [], providers: new AgentProviders() },
+        });
         const auto = new AutoModule(
             config,
             emptyCatalog.compute,

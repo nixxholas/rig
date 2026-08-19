@@ -168,9 +168,9 @@ describe("UserInput events, tools, and output bounds", () => {
             );
             const request = await module.ask(database.context, agentId, singularAsk(), "family");
 
-            await expect(
-                module.get(database.context, "parent-agent", request.id),
-            ).resolves.toEqual(request);
+            await expect(module.get(database.context, "parent-agent", request.id)).resolves.toEqual(
+                request,
+            );
             await expect(
                 module.answer(database.context, "parent-agent", {
                     requestId: request.id,
@@ -207,10 +207,7 @@ describe("UserInput events, tools, and output bounds", () => {
             });
             await expect(waiting).resolves.toMatchObject({ status: "answered" });
             await vi.waitFor(() =>
-                expect(watcher.events).toEqual([
-                    "user_input_requested",
-                    "user_input_answered",
-                ]),
+                expect(watcher.events).toEqual(["user_input_requested", "user_input_answered"]),
             );
         } finally {
             database.close();
@@ -380,9 +377,9 @@ describe("UserInput events, tools, and output bounds", () => {
                     reason: "R".repeat(MAX_USER_INPUT_CANCEL_REASON_CHARACTERS + 1),
                 }),
             ).rejects.toThrow(/invalid/iu);
-            await expect(
-                module.get(database.context, agentId, request.id),
-            ).resolves.toMatchObject({ status: "pending" });
+            await expect(module.get(database.context, agentId, request.id)).resolves.toMatchObject({
+                status: "pending",
+            });
         } finally {
             database.close();
         }

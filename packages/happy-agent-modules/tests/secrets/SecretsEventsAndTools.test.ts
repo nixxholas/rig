@@ -190,9 +190,9 @@ describe("SecretsModule event and tool contracts", () => {
             ).resolves.toMatchObject({ id: "post-commit" });
             // The failure did not stop the later subscriber and did not roll the change back.
             expect(survivors).toHaveLength(1);
-            expect(
-                await module.reference(database.context, AGENT, "post-commit"),
-            ).toMatchObject({ id: "post-commit" });
+            expect(await module.reference(database.context, AGENT, "post-commit")).toMatchObject({
+                id: "post-commit",
+            });
         });
     });
 
@@ -306,9 +306,7 @@ describe("SecretsModule event and tool contracts", () => {
             for (const id of ids) expect(formatted).toContain(id);
 
             const short = await module.list(database.context, AGENT, { limit: 1 });
-            expect(module.formatPageForModel(short)).toContain(
-                `next=${short.nextCursor ?? ""}`,
-            );
+            expect(module.formatPageForModel(short)).toContain(`next=${short.nextCursor ?? ""}`);
             expect(module.formatDetachForModel(false, "scope", ids[0]!)).toContain(ids[0]!);
             expect(module.formatAttachmentForModel("scope", page.secrets[0]!)).toContain(
                 page.secrets[0]!.id,

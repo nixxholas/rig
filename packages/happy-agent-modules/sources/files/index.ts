@@ -1,7 +1,6 @@
 export {
     fileReadQuerySchema,
     fileRevisionQuerySchema,
-    fileSearchQuerySchema,
     fileTreeQuerySchema,
     fileWriteSchema,
     projectFileCurrentHashSchema,
@@ -11,8 +10,6 @@ export {
     type FileReadQuery,
     type FileReadResult,
     type FileRevisionQuery,
-    type FileSearchQuery,
-    type FileSearchResult,
     type FileTreeQuery,
     type FileTreeResult,
     type FileWriteInput,

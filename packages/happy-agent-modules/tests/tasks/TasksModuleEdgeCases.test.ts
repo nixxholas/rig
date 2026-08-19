@@ -254,9 +254,7 @@ describe("TasksModule edge cases", () => {
             await expect(
                 tasks.create(database.context, "agent-a", { id: "one-too-many", title: "C" }),
             ).rejects.toThrow(`maximum of ${MAX_TASKS_PER_AGENT}`);
-            expect(await tasks.list(database.context, "agent-a")).toHaveLength(
-                MAX_TASKS_PER_AGENT,
-            );
+            expect(await tasks.list(database.context, "agent-a")).toHaveLength(MAX_TASKS_PER_AGENT);
             expect(events).toHaveLength(MAX_TASKS_PER_AGENT);
             expect(new Set(events)).toEqual(new Set(["task_created"]));
         } finally {

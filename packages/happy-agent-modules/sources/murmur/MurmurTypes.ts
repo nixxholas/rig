@@ -123,10 +123,7 @@ export type MurmurContactRequestResult = Static<typeof murmurContactRequestResul
 export const murmurChangedEventSchema = Type.Object(
     {
         createdAt: timestampSchema,
-        data: Type.Object(
-            { version: Type.String({ maxLength: 256, minLength: 1 }) },
-            exact,
-        ),
+        data: Type.Object({ version: Type.String({ maxLength: 256, minLength: 1 }) }, exact),
         id: Type.String({ maxLength: 256, minLength: 1 }),
         type: Type.Literal("murmur_changed"),
     },

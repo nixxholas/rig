@@ -159,9 +159,9 @@ describe("SecretsModule host and command resolution", () => {
             await expect(
                 module.resolveForCommand(database.context, AGENT, "scope-1"),
             ).rejects.toThrow("both define");
-            await expect(
-                module.resolveForHost(database.context, AGENT, "scope-1"),
-            ).rejects.toThrow("both define");
+            await expect(module.resolveForHost(database.context, AGENT, "scope-1")).rejects.toThrow(
+                "both define",
+            );
             // Selecting one side of the collision is unambiguous, so it still resolves.
             await expect(
                 module.resolveForHost(database.context, AGENT, "scope-1", ["first"]),

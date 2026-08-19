@@ -50,11 +50,7 @@ export async function temporaryTestConfig(
     toml?: string,
     options?: ConfigModuleLoadOptions,
 ): Promise<ConfigModule> {
-    return await testConfigRootedAt(
-        await mkdtemp(join(tmpdir(), "happy-modules-")),
-        toml,
-        options,
-    );
+    return await testConfigRootedAt(await mkdtemp(join(tmpdir(), "happy-modules-")), toml, options);
 }
 
 function restore(name: string, value: string | undefined): void {

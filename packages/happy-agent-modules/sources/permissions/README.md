@@ -133,7 +133,7 @@ long-window rate.
 ## The one seam that is still a host's
 
 Everything this module needs, it now asks a sibling module for — except one thing. The Auto
-instructions it writes must list what each *currently active* tool says about asking for approval,
+instructions it writes must list what each _currently active_ tool says about asking for approval,
 and which tools are active at the next inference is the merged list `@slopus/happy-agent-base`
 assembles from every module's `tools` hook plus the agent's own `state.tools`. That list is private
 to the base package, and the base package is frozen, so no module here can answer it. Until the

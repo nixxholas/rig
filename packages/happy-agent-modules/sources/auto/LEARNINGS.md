@@ -50,7 +50,7 @@
   and needs a dictated path update.
 - The module now takes only modules, plus the one structural argument `SPEC.md` §13.3 kept:
   `constructor(config: ConfigModule, compute: ComputeModule, systemPrompt: SystemPromptModule,
-  storage: AgentStorage)`. The accounts, the catalog and the working folder come from
+storage: AgentStorage)`. The accounts, the catalog and the working folder come from
   configuration; the private lifetime is derived in `beforeStart` from the context the base hands
   the module, so nothing it starts is carried by a lifetime that ends before it does; the security
   documents are `ConfigModule.readGlobalSecurity` / `readProjectSecurity`, because configuration is

@@ -7,6 +7,28 @@ afterEach(() => {
 });
 
 describe("FileMentionAutocomplete", () => {
+    it("searches with an empty query and lists files for a bare @", async () => {
+        vi.useFakeTimers();
+        const searchFiles = vi.fn(async () => [
+            { fileName: "mention-target.ts", path: "src/mention-target.ts" },
+        ]);
+        const autocomplete = new FileMentionAutocomplete(searchFiles, () => undefined);
+        const lines = ["@"];
+        const cursor = { col: 1, line: 0 };
+
+        autocomplete.sync(lines, cursor);
+        await vi.advanceTimersByTimeAsync(80);
+
+        expect(searchFiles).toHaveBeenCalledWith("");
+        expect(autocomplete.snapshot(lines, cursor)?.items).toEqual([
+            {
+                description: "src/mention-target.ts",
+                label: "mention-target.ts",
+                value: "src/mention-target.ts",
+            },
+        ]);
+    });
+
     it("does not reopen suggestions after completing a quoted mention", async () => {
         vi.useFakeTimers();
         const searchFiles = vi.fn(async () => [

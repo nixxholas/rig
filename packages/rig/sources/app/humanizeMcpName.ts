@@ -10,8 +10,7 @@ export function humanizeMcpName(value: string, fallback = "MCP"): string {
     return words
         .replace(
             /(^|[^\p{L}\p{N}])(\p{L})/gu,
-            (_match, prefix: string, character: string) =>
-                `${prefix}${character.toUpperCase()}`,
+            (_match, prefix: string, character: string) => `${prefix}${character.toUpperCase()}`,
         )
         .replace(/\bOpenai\b|\bOpen Ai\b/gu, "OpenAI")
         .replace(/\bPosthog\b|\bPost Hog\b/gu, "PostHog");

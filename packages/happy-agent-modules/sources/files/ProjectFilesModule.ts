@@ -20,7 +20,6 @@ import type { ProjectsModule } from "../projects/index.js";
 import type { WorkspacesModule } from "../workspaces/index.js";
 
 const MAX_FILE_BYTES = 44 * 1024 * 1024;
-const MAX_SEARCH_RESULTS = 50;
 const MAX_TREE_ENTRIES = 500;
 const MAX_WALK_ENTRIES = 20_000;
 
@@ -28,13 +27,6 @@ export const relativeFilePathSchema = Type.String({
     maxLength: 16_384,
     pattern: "^(?!/)(?!.*\\\\)(?!.*\\u0000)(?:[^/]+(?:/[^/]+)*)?$",
 });
-export const fileSearchQuerySchema = Type.Object(
-    {
-        limit: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_SEARCH_RESULTS })),
-        query: Type.String({ minLength: 1, maxLength: 512 }),
-    },
-    { additionalProperties: false },
-);
 export const fileTreeQuerySchema = Type.Object(
     {
         cursor: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })),
@@ -74,7 +66,6 @@ export const projectFileCurrentHashSchema = Type.Union([
     Type.String({ minLength: 64, maxLength: 64, pattern: "^[0-9a-f]{64}$" }),
 ]);
 
-export type FileSearchQuery = Static<typeof fileSearchQuerySchema>;
 export type FileTreeQuery = Static<typeof fileTreeQuerySchema>;
 export type FileReadQuery = Static<typeof fileReadQuerySchema>;
 export type FileRevisionQuery = Static<typeof fileRevisionQuerySchema>;
@@ -85,10 +76,6 @@ export interface ProjectFileRoot {
     readonly projectId: string;
     readonly workspaceId?: string;
     readonly root: string;
-}
-
-export interface FileSearchResult {
-    readonly files: readonly { readonly fileName: string; readonly path: string }[];
 }
 
 export interface FileTreeResult {
@@ -189,23 +176,6 @@ export class ProjectFilesModule {
                 "Only ready, available workspaces can access files.",
             );
         }
-    }
-
-    async search(root: ProjectFileRoot, query: FileSearchQuery): Promise<FileSearchResult> {
-        assertSchema(fileSearchQuerySchema, query, "file search query");
-        const output: { fileName: string; path: string }[] = [];
-        const normalized = query.query.toLocaleLowerCase();
-        await this.#walk(root.root, "", async (path, information) => {
-            if (output.length >= (query.limit ?? MAX_SEARCH_RESULTS)) return false;
-            if (information.isFile()) {
-                const fileName = path.split("/").at(-1) ?? path;
-                if (path.toLocaleLowerCase().includes(normalized)) {
-                    output.push({ fileName, path });
-                }
-            }
-            return true;
-        });
-        return { files: output };
     }
 
     async listPaths(

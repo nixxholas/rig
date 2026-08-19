@@ -4,11 +4,14 @@ import { afterEach, describe, expect, it } from "vitest";
 const TEST_TIMEOUT_MS = 60_000;
 const UNKNOWN_CURSOR = "00000000-0000-7000-8000-000000000000";
 type HappyAgentClient = AgentGym["client"];
-type EventStreamFrame = ReturnType<
-    HappyAgentClient["streamEvents"]
-> extends AsyncGenerator<infer Frame, unknown, unknown>
-    ? Frame
-    : never;
+type EventStreamFrame =
+    ReturnType<HappyAgentClient["streamEvents"]> extends AsyncGenerator<
+        infer Frame,
+        unknown,
+        unknown
+    >
+        ? Frame
+        : never;
 type EventStreamOptions = NonNullable<Parameters<HappyAgentClient["streamEvents"]>[0]>;
 
 type ApiFailure = {
@@ -103,10 +106,7 @@ describe("Happy Agent event transport matrix", () => {
                 limit: 10,
             });
 
-            expect(page.events.map((event) => event.cursor)).toEqual([
-                first.cursor,
-                second.cursor,
-            ]);
+            expect(page.events.map((event) => event.cursor)).toEqual([first.cursor, second.cursor]);
         },
         TEST_TIMEOUT_MS,
     );
@@ -400,32 +400,32 @@ describe("Happy Agent event transport matrix", () => {
         "events-transport-018 resumes through Last-Event-ID without replaying that cursor",
         async () => {
             const gym = await startGym();
-            const first = await createAgent(gym, "events-transport-018-first", "events-transport-018-a");
+            const first = await createAgent(
+                gym,
+                "events-transport-018-first",
+                "events-transport-018-a",
+            );
             const firstCursor = await cursorForAgent(gym.client, first.agent.id);
 
-            await withStream(
-                gym.client,
-                { lastEventId: firstCursor },
-                async (iterator) => {
-                    const hello = await nextFrame(iterator);
-                    expect(hello).toMatchObject({
-                        kind: "hello",
-                        hello: { gap: false, resumed: true },
-                    });
-                    const next = createAgent(
-                        gym,
-                        "events-transport-018-second",
-                        "events-transport-018-b",
-                    );
-                    const frame = await nextEventMatching(
-                        iterator,
-                        (event) =>
-                            event.type === "agent.created" &&
-                            event.payload.agent.id === "eventstransport018second",
-                    );
-                    expect(frame.cursor).not.toBe(firstCursor);
-                },
-            );
+            await withStream(gym.client, { lastEventId: firstCursor }, async (iterator) => {
+                const hello = await nextFrame(iterator);
+                expect(hello).toMatchObject({
+                    kind: "hello",
+                    hello: { gap: false, resumed: true },
+                });
+                const next = createAgent(
+                    gym,
+                    "events-transport-018-second",
+                    "events-transport-018-b",
+                );
+                const frame = await nextEventMatching(
+                    iterator,
+                    (event) =>
+                        event.type === "agent.created" &&
+                        event.payload.agent.id === "eventstransport018second",
+                );
+                expect(frame.cursor).not.toBe(firstCursor);
+            });
         },
         TEST_TIMEOUT_MS,
     );
@@ -691,8 +691,7 @@ describe("Happy Agent event transport matrix", () => {
                 const frame = await nextEventMatching(
                     iterator,
                     (event) =>
-                        event.type === "agent.created" &&
-                        event.payload.mutationId === mutationId,
+                        event.type === "agent.created" && event.payload.mutationId === mutationId,
                 );
 
                 if (frame.event.type !== "agent.created") {
@@ -865,11 +864,7 @@ async function rootWorkspaceId(client: HappyAgentClient): Promise<string> {
     return root.id;
 }
 
-async function createAgents(
-    gym: AgentGym,
-    count: number,
-    prefix: string,
-): Promise<void> {
+async function createAgents(gym: AgentGym, count: number, prefix: string): Promise<void> {
     const workspaceId = await rootWorkspaceId(gym.client);
     for (let index = 0; index < count; index += 1) {
         const agentId = publicAgentId(`${prefix}agent${String(index)}`);
@@ -987,9 +982,7 @@ async function withStream<Result>(
     }
 }
 
-async function nextFrame(
-    iterator: AsyncGenerator<EventStreamFrame>,
-): Promise<EventStreamFrame> {
+async function nextFrame(iterator: AsyncGenerator<EventStreamFrame>): Promise<EventStreamFrame> {
     const result = await iterator.next();
     if (result.done) throw new Error("The event stream ended before the expected frame.");
     return result.value;

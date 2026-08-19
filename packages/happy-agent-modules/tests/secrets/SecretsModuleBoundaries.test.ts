@@ -316,9 +316,9 @@ describe("SecretsModule boundary contracts", () => {
 
             // Minted IDs are usable identities: they round-trip through the public API.
             expect(reference.id).toMatch(/^[A-Za-z0-9_-]+$/);
-            await expect(
-                module.reference(database.context, AGENT, reference.id),
-            ).resolves.toEqual(reference);
+            await expect(module.reference(database.context, AGENT, reference.id)).resolves.toEqual(
+                reference,
+            );
             expect(events).toHaveLength(1);
             expect(events[0]!.eventId).toMatch(/^[A-Za-z0-9_-]+$/);
             expect(events[0]!.at).toBeGreaterThanOrEqual(before);

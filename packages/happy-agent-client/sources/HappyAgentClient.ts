@@ -662,7 +662,7 @@ export class HappyAgentClient {
 
     // Files
 
-    /** `GET /v0/workspaces/:workspaceId/files` — case-insensitive filename search. */
+    /** `GET /v0/workspaces/:workspaceId/files` — ranked fuzzy workspace-file search. */
     async searchFiles(
         workspaceId: Cuid2,
         query: FileSearchQuery,

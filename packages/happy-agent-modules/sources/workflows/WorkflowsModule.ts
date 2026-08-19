@@ -938,9 +938,7 @@ export class WorkflowsModule implements AgentModule {
     }
 
     #bound(text: string): string {
-        return text.length <= OUTPUT_CHARACTERS
-            ? text
-            : `${text.slice(0, OUTPUT_CHARACTERS - 1)}…`;
+        return text.length <= OUTPUT_CHARACTERS ? text : `${text.slice(0, OUTPUT_CHARACTERS - 1)}…`;
     }
 
     #newCollaboratorId(): string {

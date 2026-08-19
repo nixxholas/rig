@@ -29,11 +29,7 @@ export {
     secretsMigrations,
     type SecretDatabase,
 } from "./SecretDatabase.js";
-export {
-    SecretsModule,
-    SECRETS_OUTPUT_CHARACTERS,
-    SECRETS_PAGE_SIZE,
-} from "./SecretsModule.js";
+export { SecretsModule, SECRETS_OUTPUT_CHARACTERS, SECRETS_PAGE_SIZE } from "./SecretsModule.js";
 export { attachSecretTool } from "./tools/attach_secret.js";
 export { detachSecretTool } from "./tools/detach_secret.js";
 export { listSecretsTool } from "./tools/list_secrets.js";
