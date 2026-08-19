@@ -954,9 +954,11 @@ export interface ConfigModuleLoadOptions {
      *
      * This exists so a test can script inference without a vendor credential. Nothing in the
      * product supplies it, and it belongs here because this is what owns the accounts: a scripted
-     * account reaches every module that names one, not only the agent system.
+     * account reaches every module that names one, not only the agent system. Given as a
+     * factory, it receives the catalog the configuration would build on its own, so a gym can
+     * reroute the real, config-enabled accounts instead of inventing a parallel catalog.
      */
-    readonly inference?: ConfigInferenceOverride;
+    readonly inference?: ConfigInferenceOverride | ConfigInferenceFactory;
     /** Test-owned environment overrides for paths and credentials. */
     readonly environment?: Readonly<NodeJS.ProcessEnv>;
 }
@@ -969,16 +971,17 @@ export class ConfigModule implements AgentModule {
     readonly name = "config";
     readonly configuration: HappyAgentConfiguration;
 
-    readonly #scripted: ConfigInferenceOverride | undefined;
+    readonly #scripted: ConfigInferenceOverride | ConfigInferenceFactory | undefined;
     readonly #environment: Readonly<NodeJS.ProcessEnv>;
     #models: readonly AgentModel[] | undefined;
     #projectsHome: string | undefined;
     #providers: AgentProviders | undefined;
+    #resolvedScripted: ConfigInferenceOverride | undefined;
     #workspacesHome: string | undefined;
 
     private constructor(
         configuration: HappyAgentConfiguration,
-        scripted: ConfigInferenceOverride | undefined,
+        scripted: ConfigInferenceOverride | ConfigInferenceFactory | undefined,
         environment: Readonly<NodeJS.ProcessEnv>,
     ) {
         this.configuration = configuration;
@@ -1001,7 +1004,7 @@ export class ConfigModule implements AgentModule {
      * entry is the account every agent starts on.
      */
     get models(): readonly AgentModel[] {
-        this.#models ??= this.#scripted?.models ?? agentModels(this.configuration);
+        this.#models ??= this.#resolveScripted()?.models ?? agentModels(this.configuration);
         return this.#models;
     }
 
@@ -1021,8 +1024,24 @@ export class ConfigModule implements AgentModule {
      * second registry that would sign in again.
      */
     get providers(): AgentProviders {
-        this.#providers ??= this.#scripted?.providers ?? agentProviders(this.configuration);
+        this.#providers ??= this.#resolveScripted()?.providers ?? agentProviders(this.configuration);
         return this.#providers;
+    }
+
+    /**
+     * A scripted override given as a factory sees the catalog this configuration would build on
+     * its own, so it can reroute real accounts instead of inventing a parallel catalog.
+     */
+    #resolveScripted(): ConfigInferenceOverride | undefined {
+        if (typeof this.#scripted !== "function") return this.#scripted;
+        this.#resolvedScripted ??= this.#scripted(
+            {
+                models: agentModels(this.configuration),
+                providers: agentProviders(this.configuration),
+            },
+            this.configuration,
+        );
+        return this.#resolvedScripted;
     }
 
     /**
@@ -1252,6 +1271,15 @@ export interface ConfigInferenceOverride {
     readonly models: readonly AgentModel[];
     readonly providers: AgentProviders;
 }
+
+/**
+ * Builds a scripted override from the catalog the configuration enables on its own, so the
+ * override can honor real provider enablement while replacing how inference is served.
+ */
+export type ConfigInferenceFactory = (
+    real: ConfigInferenceOverride,
+    configuration: HappyAgentConfiguration,
+) => ConfigInferenceOverride;
 
 export async function loadHappyAgentConfiguration(
     input?: HappyAgentConfigurationInput,

@@ -425,12 +425,19 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
 
     setModel(modelId: string, effort: string | undefined, providerId?: string): void {
         const resolvedProviderId = providerId ?? this.#currentMode().providerId;
-        if (!this.#modelsForProvider(resolvedProviderId).some((model) => model.id === modelId)) {
+        const model = this.#modelsForProvider(resolvedProviderId).find(
+            (candidate) => candidate.id === modelId,
+        );
+        if (model === undefined) {
             throw new Error(`Unknown model '${modelId}' for provider '${resolvedProviderId}'.`);
         }
+        // Switching models must not strand an effort the new model cannot run: a carried-over
+        // effort usually belongs to the previous model, so an unsupported one falls back to the
+        // new model's own default.
+        const carried = effort ?? this.#currentMode().effort;
         this.#selection = {
             ...this.#selection,
-            ...(effort === undefined ? {} : { effort }),
+            effort: model.thinkingLevels.includes(carried) ? carried : model.defaultThinkingLevel,
             modelId,
             providerId: resolvedProviderId,
         };

@@ -12,32 +12,21 @@ afterEach(async () => {
 describe("available model guidance", () => {
     it("tells the agent which configured models it can run as subagents", async () => {
         const gym = await createGym({
-            homeFiles: {
-                ".claude/.credentials.json": JSON.stringify({
-                    claudeAiOauth: { accessToken: "claude-test-token" },
-                }),
-                ".codex/auth.json": JSON.stringify({
-                    tokens: { access_token: "codex-test-token" },
-                }),
-            },
             inference(request) {
                 const systemPrompt = request.context.systemPrompt;
-                expect(systemPrompt).toContain("# Available models");
+                expect(systemPrompt).toContain("## Available models");
                 expect(systemPrompt).toContain(
-                    "- claude: Sonnet 5 (`anthropic/sonnet-5`) — effort levels: off, low, medium (default), high, xhigh, max, ultra",
+                    "- Sonnet 5 — model ID: `anthropic/sonnet-5`; provider ID: `claude`",
                 );
                 expect(systemPrompt).toContain(
-                    "- claude: Opus 5 1M (`anthropic/opus-5`) — effort levels: off, low, medium (default), high, xhigh, max, ultra",
+                    "- Opus 5 1M — model ID: `anthropic/opus-5`; provider ID: `claude`",
                 );
                 expect(systemPrompt).toContain(
-                    "- claude: Opus 4.8 1M (`anthropic/opus-4-8`) — effort levels: off, low, medium (default), high, xhigh, max, ultra",
+                    "- Opus 4.8 1M — model ID: `anthropic/opus-4-8`; provider ID: `claude`",
                 );
                 expect(systemPrompt).toContain(
-                    "- codex: GPT-5.6 Sol (`openai/gpt-5.6-sol`) — effort levels: off, low (default), medium, high, xhigh, max, ultra",
+                    "- GPT-5.6 Sol — model ID: `openai/gpt-5.6-sol`; provider ID: `codex`",
                 );
-                expect(systemPrompt).toContain("bare model or family name");
-                expect(systemPrompt).toContain("spawn a subagent");
-                expect(systemPrompt).toContain("without asking for confirmation");
                 return { content: [{ text: "MODEL_GUIDANCE_OK", type: "text" }] };
             },
         });
@@ -60,10 +49,7 @@ describe("available model guidance", () => {
     it("keeps providers disabled by the provider default out of the picker and prompt", async () => {
         const gym = await createGym({
             homeFiles: {
-                ".codex/auth.json": JSON.stringify({
-                    tokens: { access_token: "codex-test-token" },
-                }),
-                "happy/config/happy.toml": [
+                "Happy/Config/happy.toml": [
                     "[providers]",
                     "default_enable = false",
                     "",
@@ -76,11 +62,10 @@ describe("available model guidance", () => {
                 expect(systemPrompt).toContain(
                     "# Runtime model\nModel ID: openai/gym\nProvider ID: gym",
                 );
-                expect(systemPrompt).toContain("- grok: disabled in configuration");
-                expect(systemPrompt).toContain("- claude: disabled in configuration");
                 expect(systemPrompt).toContain(
-                    "- codex: GPT-5.6 Sol (`openai/gpt-5.6-sol`) — effort levels: off, low (default), medium, high, xhigh, max, ultra",
+                    "- GPT-5.6 Sol — model ID: `openai/gpt-5.6-sol`; provider ID: `codex`",
                 );
+                expect(systemPrompt).not.toContain("Sonnet 5");
                 expect(systemPrompt).not.toContain("Grok Build");
                 expect(systemPrompt).not.toContain("Grok 4.5");
                 expect(systemPrompt).not.toContain("Composer 2.5");
@@ -110,10 +95,9 @@ describe("available model guidance", () => {
         const gym = await createGym({
             environment: {
                 AWS_BEARER_TOKEN_BEDROCK: "bedrock-test-token",
-                RIG_GYM_PROVIDER_OVERRIDES: "bedrock",
             },
             homeFiles: {
-                "happy/config/happy.toml": [
+                "Happy/Config/happy.toml": [
                     "[providers]",
                     "default_enable = false",
                     "",

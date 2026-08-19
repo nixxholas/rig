@@ -37,6 +37,8 @@ export {
     happyAgentConfigurationSchema,
     loadHappyAgentConfiguration,
     parseHappyAgentConfigToml,
+    type ConfigInferenceFactory,
+    type ConfigInferenceOverride,
     type HappyAgentConfigSource,
     type HappyAgentConfigValues,
     type HappyAgentConfiguration,

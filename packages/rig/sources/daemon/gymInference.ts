@@ -1,9 +1,9 @@
-import { AgentProviders, knownModels, type AgentModel } from "@slopus/happy-agent-base";
+import { AgentProviders, type AgentModel } from "@slopus/happy-agent-base";
+import type { ConfigInferenceFactory } from "@slopus/happy-agent-modules";
 import {
     BaseProvider,
     BaseSession,
     type ProviderModality,
-    type ProviderModelCompatibilityType,
     type SessionCompaction,
     type SessionCompactionOptions,
     type SessionContext,
@@ -16,17 +16,6 @@ import {
     type SessionUsage,
 } from "@slopus/happy-providers";
 import type { Context } from "@steve.kite/stdlib";
-
-/**
- * The gym replaces inference with an HTTP fixture while everything else in the daemon stays
- * real. This bridge serves the same scripted-response protocol the terminal gym has always
- * spoken (`packages/gym/sources/inferenceTypes.ts`), translated into the provider session
- * events the Happy Agent runtime consumes.
- */
-export interface GymInferenceBridge {
-    readonly models: readonly AgentModel[];
-    readonly providers: AgentProviders;
-}
 
 /** The model every terminal gym session runs on unless a scenario names another. */
 const GYM_MODEL: AgentModel = {
@@ -55,62 +44,28 @@ const EFFORTS: readonly SessionReasoningEffort[] = [
     "max",
 ];
 
-/** Builds the scripted inference catalog when the process runs inside a gym, else nothing. */
+/** Builds the scripted inference factory when the process runs inside a gym, else nothing. */
 export function createGymInferenceFromEnvironment(
     env: NodeJS.ProcessEnv = process.env,
-): GymInferenceBridge | undefined {
+): ConfigInferenceFactory | undefined {
     const endpoint = env.RIG_GYM_INFERENCE_URL?.trim();
     if (endpoint === undefined || endpoint.length === 0) return undefined;
     const token = env.RIG_GYM_TOKEN?.trim();
-    const overrides = (env.RIG_GYM_PROVIDER_OVERRIDES ?? "")
-        .split(",")
-        .map((value) => value.trim())
-        .filter((value): value is ProviderModelCompatibilityType =>
-            ["bedrock", "claude", "codex", "grok"].includes(value),
-        );
 
-    const providers = new AgentProviders();
-    const models: AgentModel[] = [GYM_MODEL];
-    providers.add("gym", new GymHttpProvider({ endpoint, providerId: "gym", token }), "gym");
-    for (const overridden of overrides) {
-        providers.add(
-            overridden,
-            new GymHttpProvider({ endpoint, providerId: overridden, token }),
-            overridden,
-        );
-        models.push(...overriddenModels(overridden));
-    }
-    return { models, providers };
-}
-
-/** The real catalog entries a routed provider serves, so pickers and efforts match production. */
-function overriddenModels(providerId: ProviderModelCompatibilityType): readonly AgentModel[] {
-    const prefixes =
-        providerId === "codex"
-            ? ["openai/"]
-            : providerId === "claude"
-              ? ["anthropic/"]
-              : providerId === "grok"
-                ? ["xai/"]
-                : ["openai/", "anthropic/"];
-    return knownModels
-        .filter((model) => prefixes.some((prefix) => model.id.startsWith(prefix)))
-        .map((model) => {
-            const effortLevels = model.thinkingLevels.filter(
-                (level): level is SessionReasoningEffort =>
-                    EFFORTS.includes(level as SessionReasoningEffort),
-            );
-            const fallback = effortLevels[0] ?? "medium";
-            return {
-                defaultEffort: EFFORTS.includes(model.defaultThinkingLevel as SessionReasoningEffort)
-                    ? (model.defaultThinkingLevel as SessionReasoningEffort)
-                    : fallback,
-                effortLevels: effortLevels.length === 0 ? ["medium" as const] : effortLevels,
-                id: model.id,
-                name: model.name,
+    // The configuration decides which providers exist and which models they serve, exactly as
+    // in production; the gym only replaces how each of those accounts serves inference.
+    return (real, configuration) => {
+        const providers = new AgentProviders();
+        providers.add("gym", new GymHttpProvider({ endpoint, providerId: "gym", token }), "gym");
+        for (const providerId of new Set(real.models.map((model) => model.providerId))) {
+            providers.add(
                 providerId,
-            };
-        });
+                new GymHttpProvider({ endpoint, providerId, token }),
+                configuration.values.providers[providerId]?.type ?? "codex",
+            );
+        }
+        return { models: [GYM_MODEL, ...real.models], providers };
+    };
 }
 
 // --- Wire protocol (mirrors packages/gym/sources/inferenceTypes.ts) ------------------------

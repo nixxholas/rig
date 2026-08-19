@@ -19,7 +19,12 @@ import { AutoModule } from "../auto/index.js";
 import { CollaborationModule } from "../collaboration/index.js";
 import { CompactionsModule } from "../compactions/index.js";
 import { ComputeModule, createComputeModules, type HostCompute } from "../compute/index.js";
-import { ConfigModule, type HappyAgentConfiguration } from "../config/index.js";
+import {
+    ConfigModule,
+    type ConfigInferenceFactory,
+    type ConfigInferenceOverride,
+    type HappyAgentConfiguration,
+} from "../config/index.js";
 import { ContextWindowModule } from "../contextWindow/index.js";
 import { EventsModule } from "../events/index.js";
 import { ProjectFilesModule } from "../files/index.js";
@@ -60,11 +65,11 @@ export interface StartHappyAgentRuntimeOptions {
     readonly happyHome?: string;
     /** Human-readable version this process reports. */
     readonly version?: string;
-    /** Test-only inference replacement. */
-    readonly inference?: {
-        readonly models: readonly AgentModel[];
-        readonly providers: AgentProviders;
-    };
+    /**
+     * Test-only inference replacement: a fixed catalog, or a factory that reroutes the catalog
+     * the configuration enables on its own.
+     */
+    readonly inference?: ConfigInferenceOverride | ConfigInferenceFactory;
     /** Test-only machine replacement. */
     readonly compute?: (ctx: Context, config: HostComputeConfig) => Promise<Compute>;
     /** Test-owned environment overrides consumed only by the config module. */
