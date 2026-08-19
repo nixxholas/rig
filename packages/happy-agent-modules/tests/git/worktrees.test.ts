@@ -59,3 +59,39 @@ describe("managed Git worktrees", () => {
         ).rejects.toThrow("not a real directory");
     });
 });
+
+describe("worktree checkout time budget", () => {
+    it("gives the checkout and removal an explicit budget beyond the local default", async () => {
+        const repository = await createRepository();
+        const commit = await commitFile(repository, "README.md", "fixture\n");
+        const commonDir = await readGitCommonDir(gitRunner, repository);
+        const workspace = join(await createRoot(), "workspace");
+        const budgets = new Map<string, number | undefined>();
+        const recording: typeof gitRunner = {
+            run: (cwd, args, options) => {
+                if (args[0] === "worktree") budgets.set(args[1] ?? "", options?.timeoutMs);
+                return gitRunner.run(cwd, args, options);
+            },
+        };
+
+        await createGitWorktree({
+            branch: "worktree/budget",
+            commit,
+            expectedCommonDir: commonDir,
+            git: recording,
+            projectPath: repository,
+            workspacePath: workspace,
+        });
+        await removeGitWorktree({
+            expectedCommonDir: commonDir,
+            git: recording,
+            projectPath: repository,
+            removeDirectory: true,
+            workspacePath: workspace,
+        });
+
+        // A checkout writes the whole tree, so the 5-second local-command default starves it.
+        expect(budgets.get("add")).toBeGreaterThan(60_000);
+        expect(budgets.get("remove")).toBeGreaterThan(60_000);
+    });
+});

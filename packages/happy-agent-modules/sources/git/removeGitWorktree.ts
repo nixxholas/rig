@@ -4,6 +4,7 @@ import { runGitCommandOrThrow, type GitCommandRunner } from "./GitCommandRunner.
 import { normalizeProjectCwd } from "./normalizeProjectCwd.js";
 import { readGitCommonDir } from "./readGitCommonDir.js";
 import { readGitTopLevel } from "./readGitTopLevel.js";
+import { WORKTREE_CHECKOUT_TIMEOUT_MS } from "./worktreeCheckoutTimeout.js";
 
 export async function removeGitWorktree(options: {
     expectedCommonDir: string;
@@ -30,13 +31,12 @@ export async function removeGitWorktree(options: {
         if ((await readGitCommonDir(options.git, options.workspacePath)) !== commonDir) {
             throw new Error("The workspace belongs to an unexpected repository.");
         }
-        await runGitCommandOrThrow(options.git, options.projectPath, [
-            "worktree",
-            "remove",
-            "--force",
-            "--force",
-            options.workspacePath,
-        ]);
+        await runGitCommandOrThrow(
+            options.git,
+            options.projectPath,
+            ["worktree", "remove", "--force", "--force", options.workspacePath],
+            { timeoutMs: WORKTREE_CHECKOUT_TIMEOUT_MS },
+        );
     }
     await runGitCommandOrThrow(options.git, options.projectPath, ["worktree", "prune"]);
 }
