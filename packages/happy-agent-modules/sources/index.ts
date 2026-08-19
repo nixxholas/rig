@@ -430,6 +430,9 @@ export * from "./workflows/index.js";
 // Usage: advisory provider, model, token, and timing accounting.
 export * from "./usage/index.js";
 
+// Compactions: durable manual and automatic context-replacement lifecycle.
+export * from "./compactions/index.js";
+
 // Context windows: automatic compaction from exact provider measurements.
 export * from "./contextWindow/index.js";
 

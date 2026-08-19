@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import type { AgentConfig, AgentSystemRef } from "@slopus/happy-agent-base";
 import type { Context } from "@steve.kite/stdlib";
 
+import type { Compaction } from "../compactions/index.js";
 import type { GitChangeSnapshot } from "../git/index.js";
 import type { Profile } from "../profile/index.js";
 import { ProjectsModule, type Project, type ProjectSettings } from "../projects/index.js";
@@ -226,6 +227,23 @@ export function gitResource(snapshot: GitChangeSnapshot): Record<string, unknown
         })),
         filesTruncated: snapshot.filesTruncated,
         scannedAt: snapshot.scannedAt,
+    };
+}
+
+export function compactionResource(compaction: Compaction): Record<string, unknown> {
+    return {
+        id: compaction.id,
+        agentId: compaction.agentId,
+        runId: compaction.runId ?? null,
+        trigger: compaction.trigger,
+        status: compaction.status,
+        tokensBefore: compaction.tokensBefore ?? null,
+        tokensAfter: compaction.status === "completed" ? (compaction.tokensAfter ?? null) : null,
+        failureReason: compaction.status === "failed" ? compaction.failureReason : null,
+        startedAt: compaction.startedAt,
+        completedAt: compaction.status === "running" ? null : compaction.completedAt,
+        updatedAt: compaction.updatedAt,
+        version: apiResourceVersion(compaction.updatedAt, compaction.version, compaction.id),
     };
 }
 

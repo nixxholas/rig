@@ -71,6 +71,14 @@ export const emptyMutationBodySchema = Type.Object(
     { additionalProperties: false },
 );
 
+export const compactionListQuerySchema = Type.Object(
+    {
+        before: Type.Optional(apiIdSchema),
+        limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
+    },
+    { additionalProperties: false },
+);
+
 export const projectSettingsBodySchema = Type.Object(
     {
         defaultWorkspaceCompute: Type.Union([

@@ -17,6 +17,7 @@ import { AbortModule } from "../abort/index.js";
 import { ApiModule } from "../api/index.js";
 import { AutoModule } from "../auto/index.js";
 import { CollaborationModule } from "../collaboration/index.js";
+import { CompactionsModule } from "../compactions/index.js";
 import { ComputeModule, createComputeModules, type HostCompute } from "../compute/index.js";
 import { ConfigModule, type HappyAgentConfiguration } from "../config/index.js";
 import { ContextWindowModule } from "../contextWindow/index.js";
@@ -90,6 +91,7 @@ export interface HappyAgentRuntimeModules {
     readonly api: ApiModule;
     readonly auto: AutoModule;
     readonly collaboration: CollaborationModule;
+    readonly compactions: CompactionsModule;
     readonly compute: ComputeModule;
     readonly config: ConfigModule;
     readonly contextWindow: ContextWindowModule;
@@ -295,12 +297,14 @@ export async function startHappyAgentRuntime(
         const secrets = new SecretsModule();
         const tasks = new TasksModule();
         const usage = new UsageModule(events);
+        const compactions = new CompactionsModule(events, usage);
         const contextWindow = new ContextWindowModule(config);
         const workflows = new WorkflowsModule(config, collaboration, compute.computeModule);
         const api = new ApiModule(
             abort,
             config,
             events,
+            compactions,
             projects,
             workspaces,
             terminals,
@@ -322,6 +326,7 @@ export async function startHappyAgentRuntime(
             api,
             auto,
             collaboration,
+            compactions,
             compute: compute.computeModule,
             config,
             contextWindow,
@@ -369,6 +374,7 @@ export async function startHappyAgentRuntime(
             goal,
             tasks,
             usage,
+            compactions,
             contextWindow,
             profile,
             murmur,

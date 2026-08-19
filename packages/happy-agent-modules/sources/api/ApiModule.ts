@@ -21,6 +21,11 @@ import { afterCommit, type Context } from "@steve.kite/stdlib";
 import { WebSocketServer } from "ws";
 
 import { AbortModule } from "../abort/index.js";
+import {
+    CompactionAlreadyRunningError,
+    CompactionsModule,
+    type CompactionEvent,
+} from "../compactions/index.js";
 import { ComputeModule, type ComputeProcessEvent } from "../compute/index.js";
 import { ConfigModule } from "../config/index.js";
 import { EventsModule, eventIdSchema, type AgentEvent } from "../events/index.js";
@@ -86,6 +91,7 @@ import {
     agentResource,
     agentModeFromConfig,
     apiResourceVersion,
+    compactionResource,
     gitResource,
     profileResource,
     projectResource,
@@ -98,6 +104,7 @@ import {
     abortBodySchema,
     agentCreateBodySchema,
     apiIdSchema,
+    compactionListQuerySchema,
     documentBodySchema,
     draftBodySchema,
     emptyMutationBodySchema,
@@ -117,7 +124,7 @@ import {
 } from "./ApiSchemas.js";
 import { WorkspaceProxy } from "./WorkspaceProxy.js";
 
-const API_PROTOCOL_VERSION = 19;
+const API_PROTOCOL_VERSION = 20;
 const MAX_JSON_BODY_BYTES = 48 * 1024 * 1024;
 const HEARTBEAT_MS = 15_000;
 const TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/;
@@ -149,6 +156,7 @@ export class ApiModule implements AgentModule {
     readonly #abort: AbortModule;
     readonly #config: ConfigModule;
     readonly #events: EventsModule;
+    readonly #compactions: CompactionsModule;
     readonly #projects: ProjectsModule;
     readonly #workspaces: WorkspacesModule;
     readonly #terminals: TerminalsModule;
@@ -202,6 +210,7 @@ export class ApiModule implements AgentModule {
         abort: AbortModule,
         config: ConfigModule,
         events: EventsModule,
+        compactions: CompactionsModule,
         projects: ProjectsModule,
         workspaces: WorkspacesModule,
         terminals: TerminalsModule,
@@ -219,6 +228,7 @@ export class ApiModule implements AgentModule {
         this.#abort = abort;
         this.#config = config;
         this.#events = events;
+        this.#compactions = compactions;
         this.#projects = projects;
         this.#workspaces = workspaces;
         this.#terminals = terminals;
@@ -615,6 +625,9 @@ export class ApiModule implements AgentModule {
         if (this.#unsubscribe.length > 0) return;
         this.#unsubscribe.push(
             this.#events.subscribe((event) => this.#enqueueAgentEvent(ctx, event)),
+            this.#compactions.onEvent(async (_eventCtx, event) => {
+                this.#convertCompactionEvent(event);
+            }),
             this.#projects.onEvent(async (_eventCtx, event) => {
                 await this.#convertProjectEvent(ctx, event);
             }),
@@ -688,6 +701,25 @@ export class ApiModule implements AgentModule {
             this.#compute.onProcessEvent(async (event) => {
                 await this.#convertProcessEvent(ctx, event);
             }),
+        );
+    }
+
+    #convertCompactionEvent(event: CompactionEvent): void {
+        const resource = compactionResource(event.compaction);
+        if (event.type === "compaction_created") {
+            this.#journal.append("compaction.created", { compaction: resource }, event.at);
+            return;
+        }
+        const previous = compactionResource(event.previous);
+        this.#journal.append(
+            "compaction.updated",
+            {
+                compactionId: event.compaction.id,
+                previousVersion: previous["version"],
+                version: resource["version"],
+                changes: resourceChanges(previous, resource),
+            },
+            event.at,
         );
     }
 
@@ -1499,7 +1531,7 @@ export class ApiModule implements AgentModule {
             return true;
         }
         const action =
-            /^\/v0\/agents\/([a-z][a-z0-9]*)\/(send|messages|question|abort|compact|read|archive|unarchive|reorder|draft|usage|mode|bootstrap|activity)$/.exec(
+            /^\/v0\/agents\/([a-z][a-z0-9]*)\/(send|messages|question|abort|compact|compactions|read|archive|unarchive|reorder|draft|usage|mode|bootstrap|activity)$/.exec(
                 url.pathname,
             );
         if (action !== null) {
@@ -1511,6 +1543,39 @@ export class ApiModule implements AgentModule {
             }
             if (operation === "messages" && request.method === "GET") {
                 await this.#handleAgentMessages(ctx, response, url, agentId);
+                return true;
+            }
+            if (operation === "compactions" && request.method === "GET") {
+                await this.#requireAgentResource(ctx, agentId);
+                const query = queryAs(
+                    {
+                        ...(url.searchParams.has("before")
+                            ? {
+                                  before: optionalApiId(
+                                      url.searchParams.get("before"),
+                                      "compaction",
+                                  ),
+                              }
+                            : {}),
+                        ...(url.searchParams.has("limit")
+                            ? {
+                                  limit: integerParameter(
+                                      url.searchParams.get("limit"),
+                                      50,
+                                      1,
+                                      100,
+                                  ),
+                              }
+                            : {}),
+                    },
+                    compactionListQuerySchema,
+                    "compaction history",
+                );
+                const page = await this.#compactions.listPage(ctx, agentId, query);
+                sendJson(response, 200, {
+                    compactions: page.compactions.map(compactionResource),
+                    hasMore: page.hasMore,
+                });
                 return true;
             }
             if (operation === "question" && request.method === "GET") {
@@ -1552,6 +1617,7 @@ export class ApiModule implements AgentModule {
                 return true;
             }
             if (operation === "compact" && request.method === "POST") {
+                await this.#requireAgentResource(ctx, agentId);
                 if (this.#events.activeRunId(agentId) !== undefined) {
                     throw new ApiError(
                         409,
@@ -1561,12 +1627,21 @@ export class ApiModule implements AgentModule {
                 }
                 const body = await bodyAs(request, emptyMutationBodySchema, "agent compaction");
                 const cursor = this.#journal.cursor();
-                await this.#withMutationId(
-                    body.mutationId,
-                    async () => await this.#agentSystem().compact(ctx, agentId),
-                );
+                let compaction;
+                try {
+                    compaction = await this.#withMutationId(
+                        body.mutationId,
+                        async () => await this.#compactions.startManual(ctx, agentId),
+                    );
+                } catch (error: unknown) {
+                    if (error instanceof CompactionAlreadyRunningError) {
+                        throw new ApiError(409, "conflict", error.message);
+                    }
+                    throw error;
+                }
                 sendJson(response, 202, {
                     agent: await this.#requireAgentResource(ctx, agentId),
+                    compaction: compactionResource(compaction),
                     cursor,
                 });
                 return true;
@@ -1986,11 +2061,12 @@ export class ApiModule implements AgentModule {
         // Capture first so every concurrent mutation is either in this snapshot or replayed.
         const cursor = this.#journal.cursor();
         const agent = await this.#requireAgentResource(ctx, agentId);
-        const [draft, mode, usage, pending] = await Promise.all([
+        const [draft, mode, usage, pending, compactions] = await Promise.all([
             this.#agentDraft(ctx, agentId),
             this.#agentMode(ctx, agentId),
             this.#agentUsage(ctx, agentId),
             this.#history.pending(ctx, agentId),
+            this.#compactions.listPage(ctx, agentId),
         ]);
         return {
             ...usage,
@@ -1998,6 +2074,8 @@ export class ApiModule implements AgentModule {
             draft,
             mode,
             pending: pending.map(pendingMessageResource),
+            compactions: compactions.compactions.map(compactionResource),
+            compactionsHasMore: compactions.hasMore,
             cursor,
         };
     }

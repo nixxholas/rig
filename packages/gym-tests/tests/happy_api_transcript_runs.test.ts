@@ -334,10 +334,26 @@ describe("public transcript and run APIs", () => {
             context: { contextTokens: 201_000, contextWindow: 272_000 },
         });
 
-        await gym.client.compactAgent(gym.defaultSessionId);
+        const compacted = await gym.client.compactAgent(gym.defaultSessionId, {
+            mutationId: "manual-compaction-success",
+        });
+        expect(compacted.compaction).toMatchObject({
+            agentId: gym.defaultSessionId,
+            runId: null,
+            status: "running",
+            tokensBefore: 201_000,
+            trigger: "manual",
+        });
         await gym.waitUntil(
             () => (gym.inference.compactions.length === 1 ? true : undefined),
             "the measured conversation to compact",
+        );
+        await gym.waitForEvent(
+            (event) =>
+                event.type === "compaction.updated" &&
+                event.payload.compactionId === compacted.compaction.id &&
+                event.payload.changes.status === "completed",
+            "the manual compaction to complete",
         );
         await gym.waitForEvent(
             (event) =>
@@ -348,6 +364,145 @@ describe("public transcript and run APIs", () => {
         );
         await expect(gym.client.getAgentUsage(gym.defaultSessionId)).resolves.toMatchObject({
             context: null,
+        });
+        const completed = await gym.client.listAgentCompactions(gym.defaultSessionId);
+        expect(completed).toMatchObject({
+            compactions: [
+                {
+                    id: compacted.compaction.id,
+                    failureReason: null,
+                    runId: null,
+                    status: "completed",
+                    tokensBefore: 201_000,
+                    trigger: "manual",
+                },
+            ],
+            hasMore: false,
+        });
+
+        await gym.restart();
+        await expect(gym.client.getAgentBootstrap(gym.defaultSessionId)).resolves.toMatchObject({
+            compactions: [{ id: compacted.compaction.id, status: "completed" }],
+            compactionsHasMore: false,
+        });
+        await expect(gym.client.listAgentCompactions(gym.defaultSessionId)).resolves.toEqual(
+            completed,
+        );
+    }, 60_000);
+
+    it("syncs a running manual compaction from durable bootstrap state", async () => {
+        let releaseCompaction!: () => void;
+        let providerStarted!: () => void;
+        const started = new Promise<void>((resolve) => {
+            providerStarted = resolve;
+        });
+        const gate = new Promise<void>((resolve) => {
+            releaseCompaction = resolve;
+        });
+        const gym = await startGym({
+            inference: [{ content: [{ text: "ready to compact", type: "text" }] }],
+            compaction: async (request) => {
+                providerStarted();
+                await gate;
+                return {
+                    status: "completed",
+                    preservedMessages: [],
+                    usage: {
+                        cacheRead: 0,
+                        cacheWrite: 0,
+                        input: 100,
+                        output: 10,
+                        totalTokens: 110,
+                    },
+                    context: request.context,
+                };
+            },
+        });
+        await gym.send("create context before the running sync check");
+        const compacted = await gym.client.compactAgent(gym.defaultSessionId);
+        await started;
+
+        try {
+            await expect(gym.client.getAgentBootstrap(gym.defaultSessionId)).resolves.toMatchObject(
+                {
+                    compactions: [
+                        {
+                            id: compacted.compaction.id,
+                            status: "running",
+                            trigger: "manual",
+                        },
+                    ],
+                },
+            );
+            await expect(
+                gym.client.listAgentCompactions(gym.defaultSessionId),
+            ).resolves.toMatchObject({
+                compactions: [{ id: compacted.compaction.id, status: "running" }],
+            });
+            expect(
+                (
+                    await gym.client.getEvents({
+                        after: compacted.cursor,
+                        limit: 100,
+                    })
+                ).events,
+            ).toContainEqual(
+                expect.objectContaining({
+                    type: "compaction.created",
+                    payload: expect.objectContaining({
+                        compaction: expect.objectContaining({ id: compacted.compaction.id }),
+                    }),
+                }),
+            );
+        } finally {
+            releaseCompaction();
+        }
+        await gym.waitUntil(async () => {
+            const latest = (await gym.client.listAgentCompactions(gym.defaultSessionId))
+                .compactions[0];
+            return latest?.status === "completed" ? true : undefined;
+        }, "the synchronized running compaction to complete");
+    }, 60_000);
+
+    it("persists a failed manual compaction with a meaningful reason", async () => {
+        const failure = "The provider rejected compaction.";
+        const gym = await startGym({
+            inference: [{ content: [{ text: "context exists", type: "text" }] }],
+            compaction: () => ({
+                status: "failed",
+                kind: "inference_error",
+                message: failure,
+            }),
+        });
+        await gym.send("prepare a failed manual compaction");
+        const compacted = await gym.client.compactAgent(gym.defaultSessionId);
+        const failed = await gym.waitUntil(async () => {
+            const latest = (await gym.client.listAgentCompactions(gym.defaultSessionId))
+                .compactions[0];
+            return latest?.status === "failed" ? latest : undefined;
+        }, "the manual compaction to fail");
+        expect(failed).toMatchObject({
+            id: compacted.compaction.id,
+            completedAt: expect.any(Number),
+            failureReason: failure,
+            status: "failed",
+            trigger: "manual",
+        });
+        await gym.waitForEvent(
+            (event) =>
+                event.type === "compaction.updated" &&
+                event.payload.compactionId === compacted.compaction.id &&
+                event.payload.changes.status === "failed" &&
+                event.payload.changes.failureReason === failure,
+            "the failed compaction lifecycle event",
+        );
+        await gym.waitUntil(async () => {
+            return (await gym.client.getAgent(gym.defaultSessionId)).agent.status === "idle"
+                ? true
+                : undefined;
+        }, "the agent to leave failed compaction work");
+        await expect(gym.client.getAgentBootstrap(gym.defaultSessionId)).resolves.toMatchObject({
+            compactions: [{ id: compacted.compaction.id, status: "failed" }],
         });
     }, 60_000);
 
@@ -369,13 +524,25 @@ describe("public transcript and run APIs", () => {
                       },
         });
 
-        await gym.send("approach the context limit");
+        const sent = await gym.send("approach the context limit");
         await gym.waitUntil(
             () => (gym.inference.compactions.length === 1 ? true : undefined),
             "automatic context compaction",
         );
         await expect(gym.client.getAgentUsage(gym.defaultSessionId)).resolves.toMatchObject({
             context: null,
+        });
+        const automatic = await gym.waitUntil(async () => {
+            const latest = (await gym.client.listAgentCompactions(gym.defaultSessionId))
+                .compactions[0];
+            return latest?.status === "completed" ? latest : undefined;
+        }, "the automatic compaction lifecycle to settle");
+        expect(automatic).toMatchObject({
+            agentId: gym.defaultSessionId,
+            runId: sent.runId,
+            status: "completed",
+            tokensBefore: 245_000,
+            trigger: "automatic",
         });
         expect(gym.inference.unscripted).toEqual([]);
     }, 60_000);
