@@ -461,24 +461,26 @@ async function followAgentEvents(options: {
                 if (typeof changes.title === "string") {
                     options.terminal.setTitle(`Rig - ${sanitizeTerminalTitle(changes.title)}`);
                 }
-                if ("draft" in changes) {
-                    const updatedAt = changes.updatedAt ?? Date.now();
-                    options.app.applySessionEvent({
-                        createdAt: updatedAt,
-                        data: {
-                            ...(changes.draft?.text === undefined
-                                ? {}
-                                : { draft: changes.draft.text }),
-                            ...(event.payload.mutationId === undefined
-                                ? {}
-                                : { origin: event.payload.mutationId }),
-                            updatedAt,
-                        },
-                        id: createId(),
-                        sessionId: options.agent.id,
-                        type: "session_draft_changed",
-                    });
-                }
+            } else if (
+                event.type === "agent.draft.updated" &&
+                event.payload.agentId === options.agent.id
+            ) {
+                const updatedAt = event.payload.draft.updatedAt ?? Date.now();
+                options.app.applySessionEvent({
+                    createdAt: updatedAt,
+                    data: {
+                        ...(event.payload.draft.value?.text === undefined
+                            ? {}
+                            : { draft: event.payload.draft.value.text }),
+                        ...(event.payload.mutationId === undefined
+                            ? {}
+                            : { origin: event.payload.mutationId }),
+                        updatedAt,
+                    },
+                    id: createId(),
+                    sessionId: options.agent.id,
+                    type: "session_draft_changed",
+                });
             } else if (
                 event.type === "question.created" &&
                 event.payload.question.agentId === options.agent.id
