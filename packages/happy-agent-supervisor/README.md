@@ -68,7 +68,7 @@ package explicitly and read its path from your build script:
 
 ```sh
 # The binary you want to copy into a linux/amd64 image.
-npm install --no-save @slopus/happy-agent-supervisor@0.0.2-linux-x64
+npm install --no-save @slopus/happy-agent-supervisor@0.0.3-linux-x64
 ```
 
 Or ask your package manager for every variant at once, which is what a release
@@ -76,8 +76,8 @@ pipeline usually wants:
 
 ```sh
 npm install --force \
-  @slopus/happy-agent-supervisor@0.0.2-linux-x64 \
-  @slopus/happy-agent-supervisor@0.0.2-linux-arm64
+  @slopus/happy-agent-supervisor@0.0.3-linux-x64 \
+  @slopus/happy-agent-supervisor@0.0.3-linux-arm64
 ```
 
 Then point the container at it:
