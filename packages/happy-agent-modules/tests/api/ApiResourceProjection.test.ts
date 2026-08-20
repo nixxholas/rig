@@ -27,6 +27,34 @@ describe("apiResourceVersion", () => {
 });
 
 describe("messageResource", () => {
+    it("projects a durable system notice with its role intact", () => {
+        expect(
+            messageResource({
+                at: 100,
+                blocks: [
+                    {
+                        type: "text",
+                        text: "These AGENTS.md instructions replace earlier instructions.",
+                    },
+                ],
+                hideFromUser: true,
+                recordId: "agents-md-notice",
+                role: "system",
+            }),
+        ).toEqual({
+            id: "agents-md-notice",
+            role: "system",
+            createdAt: 100,
+            content: [
+                {
+                    type: "text",
+                    text: "These AGENTS.md instructions replace earlier instructions.",
+                },
+            ],
+            metadata: {},
+        });
+    });
+
     it("projects a completed command with the same display-ready tool presentation", () => {
         expect(
             messageResource({

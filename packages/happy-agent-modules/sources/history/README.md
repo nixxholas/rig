@@ -10,16 +10,16 @@ The module writes as the agent works: every accepted user message, every complet
 response, every tool result, and every failed inference, from inside the transactions that commit
 that work, so the record and the thing recorded become durable together.
 
-The record keeps who actually sent each incoming message. Provider input shapes only have user
-and assistant roles, so goal continuations, collaboration deliveries, and other system-generated
-messages all reach the model wearing the user role; the history records them under their real
-sender instead. A message the host positively stamped as an end-user submission (the same
-`messageOrigin` provenance metadata the automatic permission reviewer trusts) is recorded as
-`role: "user"`; everything else, including an unstamped message, is recorded as `role: "agent"`,
-with `senderAgentId` naming the specific sending agent when its metadata named one — the
-collaboration module names the sending collaborator, and a goal continuation names the agent
-driving itself. This fails closed: a forgetful path under-attributes rather than a synthetic
-message being recorded as the person.
+The record keeps who actually sent each incoming message. An actual system-role message remains
+`role: "system"`. Goal continuations, collaboration deliveries, and some other generated messages
+reach the model wearing the user role; history records those under their real sender instead. A
+user-role message the host positively stamped as an end-user submission (the same `messageOrigin`
+provenance metadata the automatic permission reviewer trusts) is recorded as `role: "user"`;
+every other user-role message, including an unstamped one, is recorded as `role: "agent"`, with
+`senderAgentId` naming the specific sending agent when its metadata named one — the collaboration
+module names the sending collaborator, and a goal continuation names the agent driving itself.
+This fails closed: a forgetful path under-attributes rather than a synthetic message being
+recorded as the person.
 
 ```ts
 import { Agent } from "@slopus/happy-agent-base";

@@ -1494,13 +1494,14 @@ export class HistoryModule implements AgentModule {
         },
 
         /**
-         * Record an accepted incoming message beside the Agent Base message transaction. Who
-         * sent it is recorded from the message's provenance metadata while it still exists: only
-         * a message positively stamped as an end-user submission is recorded as
-         * `role: "user"`, and everything else — a goal continuation, a collaboration delivery, an
-         * unstamped message — is recorded as `role: "agent"`, naming the specific sender when the
-         * metadata named one. This fails closed: a forgetful path under-attributes rather than a
-         * synthetic message impersonating the person.
+         * Record an accepted incoming message beside the Agent Base message transaction. An
+         * actual system-role message stays `role: "system"`. For user-role messages, provenance
+         * metadata records who sent it while that metadata still exists: only a message positively
+         * stamped as an end-user submission is recorded as `role: "user"`; everything else — a
+         * goal continuation, a collaboration delivery, an unstamped message — is recorded as
+         * `role: "agent"`, naming the specific sender when the metadata named one. This fails
+         * closed: a forgetful path under-attributes rather than a synthetic message impersonating
+         * the person.
          */
         messageAcceptedTransact: async (
             ctx: Context,
@@ -1535,7 +1536,8 @@ export class HistoryModule implements AgentModule {
                 ? (happyMetadata as HappyMessageMetadata).remoteMessageId
                 : undefined;
             await this.#beginRun(ctx, scope.agent.id, runId, accepted.kind, acceptedAt);
-            const fromUser = isUserOriginMetadata(accepted.metadata);
+            const isSystem = accepted.message.role === "system";
+            const fromUser = !isSystem && isUserOriginMetadata(accepted.metadata);
             const sender = fromUser ? undefined : senderAgentIdOf(accepted.metadata);
             // A message from another agent may carry the reasoning that agent exposed. It is
             // recorded as thinking, the way this module records any other reasoning; reasoning
@@ -1548,7 +1550,7 @@ export class HistoryModule implements AgentModule {
                 at: acceptedAt,
                 blocks,
                 recordId: accepted.id,
-                role: fromUser ? "user" : "agent",
+                role: isSystem ? "system" : fromUser ? "user" : "agent",
                 runId,
                 ...(fromUser
                     ? {

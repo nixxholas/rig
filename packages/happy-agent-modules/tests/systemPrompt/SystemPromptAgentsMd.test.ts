@@ -261,6 +261,7 @@ describe("SystemPromptModule AGENTS.md instructions", () => {
         if (replacementAction?.type !== "steer" || replacementAction.id === undefined) {
             throw new Error("Expected a steering replacement notice.");
         }
+        expect(replacementAction.message.role).toBe("system");
         expect(replacementAction.message.content[0]).toMatchObject({
             text: expect.stringContaining(
                 "These AGENTS.md instructions replace all previously provided",
@@ -284,6 +285,7 @@ describe("SystemPromptModule AGENTS.md instructions", () => {
         expect(removal?.[0]).toMatchObject({
             type: "steer",
             message: {
+                role: "system",
                 content: [
                     { text: "The previously provided AGENTS.md instructions no longer apply." },
                 ],

@@ -191,6 +191,23 @@ describe("HistoryModule durability", () => {
                 kind: "steering",
                 message: { role: "user", content: [{ text: "Unstamped.", type: "text" }] },
             });
+            await hooks.messageAcceptedTransact!(database.context, scope, {
+                id: "accepted-system",
+                kind: "steering",
+                message: {
+                    role: "system",
+                    content: [
+                        {
+                            text: "These AGENTS.md instructions replace earlier instructions.",
+                            type: "text",
+                        },
+                    ],
+                },
+                metadata: {
+                    ...AGENT_MESSAGE_ORIGIN_METADATA,
+                    hideFromUser: true,
+                },
+            });
 
             const page = await history.read(database.context, "agent-a");
             expect(
@@ -199,6 +216,7 @@ describe("HistoryModule durability", () => {
                 ["user", undefined],
                 ["agent", "agent-b"],
                 ["agent", undefined],
+                ["system", undefined],
             ]);
 
             const human = page.messages[0]!.message;

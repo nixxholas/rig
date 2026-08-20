@@ -292,7 +292,7 @@ export class AgentsMdInstructions {
                 type: "steer",
                 id: pending.id,
                 message: {
-                    role: "user",
+                    role: "system",
                     content: [{ type: "text", text }],
                 },
                 metadata: {
@@ -320,7 +320,7 @@ export class AgentsMdInstructions {
         const { fingerprint, noticeId } = metadata;
         if (accepted.kind !== "steering" || accepted.id !== noticeId) return;
         if (accepted.metadata?.hideFromUser !== true) return;
-        if (accepted.message.role !== "user") return;
+        if (accepted.message.role !== "system") return;
         const content = accepted.message.content;
         if (content.length !== 1) return;
         const part = content[0];
