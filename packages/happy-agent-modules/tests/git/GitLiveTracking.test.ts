@@ -101,7 +101,7 @@ describe("GitModule live tracking", () => {
         expect(published).toBe(1);
     });
 
-    it("atomically replaces the tracked subscription set without rescanning retained repositories", async () => {
+    it("atomically replaces the tracked subscription set while retaining known snapshots", async () => {
         const firstRepository = await createRepository();
         const firstHead = await commitFile(firstRepository, "tracked.txt", "one\n");
         await setOriginMain(firstRepository, firstHead);
@@ -134,6 +134,45 @@ describe("GitModule live tracking", () => {
         expect(module.liveSnapshots()).toHaveLength(1);
         expect(module.trackedSnapshot(second)).toBe(retained);
     });
+
+    it("reconciles a retained repository when its subscription is renewed", async () => {
+        const repository = await createRepository();
+        const head = await commitFile(repository, "tracked.txt", "one\n");
+        await setOriginMain(repository, head);
+        let statusReads = 0;
+        const module = open({
+            run: gitRunner.run,
+            async scan(options) {
+                if (options.args[0] === "status") statusReads += 1;
+                const result = await gitRunner.run(
+                    options.cwd,
+                    ["--no-optional-locks", ...options.args],
+                    {
+                        ...(options.maximumBytes === undefined
+                            ? {}
+                            : { maxOutputBytes: options.maximumBytes }),
+                        ...(options.signal === undefined ? {} : { signal: options.signal }),
+                    },
+                );
+                if (result.code !== 0) throw new Error(result.stderr);
+                return {
+                    stdout: result.stdout,
+                    stdoutBytes: Buffer.from(result.stdout),
+                    truncated: false,
+                };
+            },
+        });
+        const entity = { path: repository, projectId: "project-1" };
+
+        module.replaceTracked([entity]);
+        await waitFor(() => module.trackedSnapshot(entity) !== undefined);
+        await waitForSettled(() => statusReads, 300);
+        const readsBeforeRenewal = statusReads;
+
+        module.replaceTracked([entity]);
+
+        await waitFor(() => statusReads > readsBeforeRenewal);
+    }, 10_000);
 
     it("retires omitted repositories before their first scan and settles concurrent replacements to the final set", async () => {
         const firstRepository = await createRepository();
@@ -225,4 +264,21 @@ async function waitForNoChange(read: () => number, durationMs: number): Promise<
         expect(read()).toBe(initial);
         await new Promise((resolve) => setTimeout(resolve, 5));
     }
+}
+
+async function waitForSettled(read: () => number, durationMs: number): Promise<void> {
+    const deadline = Date.now() + 5_000;
+    let observed = read();
+    let stableSince = Date.now();
+    while (Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        const current = read();
+        if (current !== observed) {
+            observed = current;
+            stableSince = Date.now();
+        } else if (Date.now() - stableSince >= durationMs) {
+            return;
+        }
+    }
+    throw new Error("Timed out waiting for the Git module to settle.");
 }

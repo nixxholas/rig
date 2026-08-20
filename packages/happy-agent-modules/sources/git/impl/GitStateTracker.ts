@@ -98,6 +98,7 @@ export class GitStateTracker {
             existing.entity = entity;
             existing.expiresAt = Date.now() + WATCH_TTL_MS;
             existing.lastActiveAt = Date.now();
+            this.markChanged(entity);
             return;
         }
         this.#watch(entity);
@@ -132,6 +133,7 @@ export class GitStateTracker {
             existing.entity = entity;
             existing.expiresAt = now + WATCH_TTL_MS;
             existing.lastActiveAt = now;
+            this.markChanged(entity);
         }
     }
 
