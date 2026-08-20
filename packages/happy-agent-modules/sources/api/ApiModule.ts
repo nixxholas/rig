@@ -186,6 +186,7 @@ export class ApiModule implements AgentModule {
             committed: Record<string, unknown>[];
             current: Record<string, unknown>[];
             messageId: string;
+            runId: string;
         }
     >();
     readonly #streamingDeltaOffsets = new Map<string, number[]>();
@@ -1171,9 +1172,14 @@ export class ApiModule implements AgentModule {
         if (agentId === undefined || underlyingRunId === undefined || type === undefined) {
             return;
         }
-        const runId =
+        const candidateRunId =
             (this.#activeRuns.get(agentId)?.["id"] as string | undefined) ?? underlyingRunId;
-        const messageId = apiAssistantMessageId(runId);
+        const streaming = this.#streamingAssistantBlocks.get(agentId);
+        const { messageId, runId } = apiAssistantIdentityForProviderEvent(
+            type,
+            candidateRunId,
+            streaming,
+        );
         const metadata = {
             ...(stringValue(payload?.["provider"]) === undefined
                 ? {}
@@ -1185,7 +1191,6 @@ export class ApiModule implements AgentModule {
         if (type === "block_start") {
             // The provider streams one block at a time, but the API message accumulates them:
             // a later block joins the message instead of restarting it.
-            const streaming = this.#streamingAssistantBlocks.get(agentId);
             if (streaming !== undefined && streaming.messageId === messageId) {
                 streaming.committed.push(...streaming.current);
                 streaming.current = [];
@@ -1195,6 +1200,7 @@ export class ApiModule implements AgentModule {
                 committed: [],
                 current: [],
                 messageId,
+                runId,
             });
             this.#streamingDeltaOffsets.set(agentId, []);
             this.#journal.append(
@@ -1224,7 +1230,6 @@ export class ApiModule implements AgentModule {
             );
             return;
         }
-        const streaming = this.#streamingAssistantBlocks.get(agentId);
         const committed = streaming?.messageId === messageId ? streaming.committed : [];
         if (type === "text_delta" || type === "thinking_delta") {
             const blockIndex = rigEvent?.["contentIndex"];
@@ -4037,6 +4042,20 @@ function statusForAgentEvent(
 
 function apiAssistantMessageId(runId: string): string {
     return `a${createHash("sha256").update(runId).digest("hex").slice(0, 24)}`;
+}
+
+export function apiAssistantIdentityForProviderEvent(
+    eventType: string,
+    candidateRunId: string,
+    streaming: { readonly messageId: string; readonly runId: string } | undefined,
+): { readonly messageId: string; readonly runId: string } {
+    if (eventType !== "block_start" && streaming !== undefined) {
+        return { messageId: streaming.messageId, runId: streaming.runId };
+    }
+    return {
+        messageId: apiAssistantMessageId(candidateRunId),
+        runId: candidateRunId,
+    };
 }
 
 function resourceChanges(
