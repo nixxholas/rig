@@ -26,6 +26,7 @@ import {
     type HappyAgentConfiguration,
 } from "../config/index.js";
 import { ContextWindowModule } from "../contextWindow/index.js";
+import { DutyModule } from "../duty/index.js";
 import { EventsModule } from "../events/index.js";
 import { ProjectFilesModule } from "../files/index.js";
 import { GitModule } from "../git/index.js";
@@ -99,6 +100,7 @@ export interface HappyAgentRuntimeModules {
     readonly compute: ComputeModule;
     readonly config: ConfigModule;
     readonly contextWindow: ContextWindowModule;
+    readonly duty: DutyModule;
     readonly events: EventsModule;
     readonly files: ProjectFilesModule;
     readonly goal: GoalModule;
@@ -308,6 +310,7 @@ export async function startHappyAgentRuntime(
             workspaces,
         );
         const goal = new GoalModule();
+        const duty = new DutyModule();
         const imageGeneration = new ImageGenerationModule(config);
         const modelSwitch = new ModelSwitchModule(history);
         const search = new SearchModule(config);
@@ -345,6 +348,7 @@ export async function startHappyAgentRuntime(
             compute: compute.computeModule,
             config,
             contextWindow,
+            duty,
             events,
             files,
             goal,
@@ -386,6 +390,7 @@ export async function startHappyAgentRuntime(
             auto,
             presence,
             goal,
+            duty,
             tasks,
             usage,
             events,
