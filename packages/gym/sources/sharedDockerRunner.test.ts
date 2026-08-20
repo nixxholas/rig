@@ -25,6 +25,11 @@ describe("dockerSandboxArguments", () => {
             "--bind",
             "/gym-state/fixture/tmp",
             "/tmp",
+            // The fixture home cannot hold the daemon's Unix socket, so the daemon's private
+            // directory is bound from container-local state instead.
+            "--bind",
+            "/gym-state/fixture/agent",
+            "/home/rig/.happy/agent",
             "--tmpfs",
             "/gyms",
             "--tmpfs",
