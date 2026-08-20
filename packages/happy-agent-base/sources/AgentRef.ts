@@ -62,7 +62,7 @@ export class AgentRef<Database extends AgentDatabase = AgentDatabase> {
         await this.#agent.updateMetadata(ctx, update);
     }
 
-    /** Ask the agent to compact, which it does between turns. */
+    /** Ask the agent to compact at its next safe inference boundary. */
     async compact(ctx: Context): Promise<void> {
         await this.#agent.compact(ctx);
     }

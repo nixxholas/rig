@@ -232,7 +232,7 @@ describe("AgentSystemRef", () => {
         await system.delete(ctx, agent.id);
 
         // The direct `compact` refuses this exact call; through the reference it is a request,
-        // so the tool returns, the turn ends, and the compaction happens between turns.
+        // so the tool returns, its result settles, and compaction runs before the continuation.
         expect(failure).toBeUndefined();
     });
 

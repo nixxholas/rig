@@ -2133,7 +2133,49 @@ describe("AgentBase compaction", () => {
         context: { instructions: "", messages },
     });
 
-    it("waits for the active turn to end, then replaces the compacted history", async () => {
+    it("runs a compaction requested after inference before the next tool continuation", async () => {
+        const provider = new ScriptedProvider([
+            [
+                { type: "toolcall_start", callId: "call-1", name: "lookup" },
+                { type: "toolcall_end", callId: "call-1", arguments: "{}" },
+                { type: "done", state: "tool_call", tokens: { input: 100, output: 20 } },
+            ],
+            textTurn("continued from the compacted context"),
+        ]);
+        const original = provider.session.bind(provider);
+        provider.session = async (id, options) => {
+            const session = await original(id, options);
+            (session as ScriptedSession).compactionResults = [completed([compactionMessage])];
+            return session;
+        };
+        let agent!: AgentBase;
+        agent = await AgentBase.create(ctx, {
+            id: "test-agent",
+            providers: providersOf(provider),
+            provider: "scripted",
+            persistence: new InMemoryPersistence(),
+            initialState: { tools: [tool("lookup")] },
+            hooks: {
+                afterInference: async (hookCtx, inference) => {
+                    if (inference.state === "tool_call") await agent.compact(hookCtx);
+                },
+            },
+        });
+
+        await agent.send(ctx, user("go"));
+        await agent.waitForIdle();
+
+        const session = provider.sessions[0];
+        expect(session?.compactions[0]?.context.messages.at(-1)).toEqual({
+            role: "tool",
+            callId: "call-1",
+            content: [{ type: "text", text: "ok" }],
+        });
+        expect(session?.requests[1]?.context.messages).toEqual([compactionMessage]);
+        await agent.close();
+    });
+
+    it("waits for the active tool batch, then compacts before its continuation", async () => {
         const persistence = new InMemoryPersistence();
         const provider = new ScriptedProvider([
             [
@@ -2177,19 +2219,23 @@ describe("AgentBase compaction", () => {
         await compaction;
         await agent.waitForIdle();
 
-        // The compaction saw the complete finished turn, not the mid-turn state.
+        // The compaction saw the settled tool result, then the continuation ran on its
+        // replacement rather than making one more request against the oversized context.
         expect(session?.compactions).toHaveLength(1);
-        expect(session?.compactions[0]?.context.messages).toHaveLength(4);
+        expect(session?.compactions[0]?.context.messages).toHaveLength(3);
         expect(session?.compactions[0]?.context.messages.at(-1)).toEqual({
-            role: "assistant",
-            content: [{ type: "text", text: "turn finished" }],
+            role: "tool",
+            callId: "call-1",
+            content: [],
         });
-        // The superseded records are physically gone; the store holds only the replacement.
+        expect(session?.requests[1]?.context.messages).toEqual([compactionMessage, user("go")]);
+        // The superseded records are physically gone; later output follows the replacement.
         expect(persistence.records).toEqual([
             {
                 type: "compaction",
                 messages: [compactionMessage, user("go")],
             },
+            { type: "block", block: { type: "text", text: "turn finished" } },
         ]);
 
         await agent.send(ctx, user("after compaction"));
@@ -2197,6 +2243,7 @@ describe("AgentBase compaction", () => {
         expect(session?.requests.at(-1)?.context.messages).toEqual([
             compactionMessage,
             user("go"),
+            { role: "assistant", content: [{ type: "text", text: "turn finished" }] },
             user("after compaction"),
         ]);
         await agent.close();

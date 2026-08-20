@@ -297,9 +297,10 @@ export interface AgentBaseOptions {
  *
  * ## Compaction
  *
- * A compaction runs before a turn's first inference, so the model always receives a settled
- * conversation. It replaces the history whole or not at all. A compaction nobody will carry out
- * is rejected rather than left waiting.
+ * A compaction runs at the next safe inference boundary: before a turn's first request, or after
+ * the current response's complete tool batch settles and before its continuation. It replaces the
+ * history whole or not at all. A compaction nobody will carry out is rejected rather than left
+ * waiting.
  *
  * ## Model changes
  *
@@ -1422,9 +1423,9 @@ export class AgentBase {
     }
 
     /**
-     * Compact the conversation. The compaction waits for the active turn to end — or runs right
-     * away when idle — and replaces the compacted history with the provider's replacement context
-     * while keeping every message that joined the history after the snapshot.
+     * Compact the conversation. The compaction waits for the active response and its tool batch
+     * to settle — or runs right away when idle — then replaces the history before another
+     * inference iteration. The provider's replacement keeps every message it retained.
      *
      * Returns once the compaction has been asked for. Concurrent requests share one compaction.
      */
@@ -2249,6 +2250,10 @@ export class AgentBase {
                     if (hasPendingWork) await this.#emit(ctx, { type: "done", state: "cancelled" });
                     break;
                 }
+                // A hook may request compaction after the response that dispatched the tool
+                // batch. Its results are settled now, so replace the measured context before
+                // another inference iteration or newly queued input can enter it.
+                await this.#runCompaction(ctx, abort.signal);
                 await this.#finishAdmittedQueueWrites();
                 // A message accepted through an outer transaction becomes visible only after
                 // that transaction commits. Merge those durable queue entries here, at the same
