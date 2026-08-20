@@ -50,7 +50,6 @@
     "scripts": {
         "build": "TMPDIR=\"$PWD/../../.local\" tsx scripts/build.ts",
         "check": "tsc --noEmit",
-        "dev": "pnpm --filter @slopus/rig-dev dev",
         "start": "node dist/main.js",
         "test": "vitest run --isolate=false",
         "test:live": "RIG_LIVE_TEST=1 vitest run -c vitest.live.config.ts",

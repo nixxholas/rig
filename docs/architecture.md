@@ -417,7 +417,6 @@ transaction, advancing `PRAGMA user_version` after each one and stamping
 | `packages/happy-plugins`       | The typed API available to TypeScript plugins running inside Happy, plus the development runner.                                                                           |
 | `packages/gym`                 | Private host-side end-to-end harness: PTY integration, fixtures, and the Docker image definition.                                                                          |
 | `packages/gym-tests`           | Private black-box terminal scenarios exercising the built Rig agent in fresh containers.                                                                                   |
-| `packages/rig-dev`             | Private `rig-dev` launcher that runs live source with its own socket, token, logs, and database under `.rig-dev`.                                                          |
 
 Inside a package, code is organized by domain module (`git`, `fs`, `sandbox`,
 `docker`, `secrets`, `session`, `server`, `persistence`, …). A module's top level

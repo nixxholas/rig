@@ -639,28 +639,6 @@ importers:
         specifier: ^3.2.4
         version: 3.2.6(@types/node@24.13.2)(jiti@2.7.0)(tsx@4.23.0)(yaml@2.9.0)
 
-  packages/rig-dev:
-    dependencies:
-      '@slopus/happy-agent':
-        specifier: workspace:*
-        version: link:../happy-agent
-      '@slopus/happy-agent-client':
-        specifier: 0.0.12
-        version: 0.0.12
-      '@steve.kite/stdlib':
-        specifier: 0.0.12
-        version: 0.0.12
-      tsx:
-        specifier: ^4.23.0
-        version: 4.23.0
-    devDependencies:
-      '@types/node':
-        specifier: ^24.0.10
-        version: 24.13.2
-      typescript:
-        specifier: ^5.8.3
-        version: 5.9.3
-
 packages:
 
   '@anthropic-ai/bedrock-sdk@0.32.0':

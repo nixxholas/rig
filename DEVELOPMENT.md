@@ -10,7 +10,6 @@ Rig is a pnpm TypeScript workspace.
 
 - `packages/rig` contains the published `@slopus/rig` CLI, agent runtime, and
   local daemon. Its entry point is `packages/rig/sources/main.ts`.
-- `packages/rig-dev` contains the private live-source `rig-dev` launcher.
 - `packages/gym` contains the host-side end-to-end harness, PTY integration,
   fixtures, and Docker image definition.
 - `packages/gym-tests` contains black-box terminal scenarios that exercise the
@@ -28,28 +27,34 @@ Install dependencies from the repository root:
 pnpm install
 ```
 
-Start the development CLI in its own terminal:
+Build and start Rig with checkout-local state:
 
 ```sh
 pnpm dev
 ```
 
-To make the development CLI available as `rig-dev` from any directory, link its
-private package once:
+This builds the checkout, reloads its isolated Happy agent, and runs the built
+Rig CLI. The agent socket, token, logs, registry, and session database stay
+under the ignored `.rig-dev` directory instead of the normal Happy home. The
+agent remains available after the TUI exits; the next `pnpm dev` reloads it from
+the newest build.
+
+## Running this checkout as the global `rig`
+
+To make `rig` resolve to a fresh build from this checkout, run:
 
 ```sh
-pnpm link:dev
+pnpm link:global
 ```
 
-Use `pnpm unlink:dev` to remove the global link. The released `rig` command is
-unaffected because the two commands come from separate packages.
+This builds every package, links `packages/rig` globally, and reloads the normal
+Rig daemon from that build. The link points at this checkout, but Rig executes
+`packages/rig/dist/main.js`, so run `pnpm link:global` again whenever you want to
+rebuild and restart it with newer source.
 
-Both development commands run live source from this checkout. They keep their
-daemon socket, token, logs, registry, and session database in the checkout's
-ignored `.rig-dev` directory while using the directory where `rig-dev` was
-invoked as the session workspace. They do not reuse or replace the installed
-Rig daemon. When runtime source changes, the CLI fingerprints it and asks before
-restarting an older workspace daemon.
+Use `pnpm unlink:global` to remove the link before installing a published Rig
+again. Linking the real package uses the normal Happy home, sessions, and daemon;
+it is not isolated like `pnpm dev`.
 
 ## Live process debugging
 

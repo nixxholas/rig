@@ -267,7 +267,6 @@ export interface ModelCatalog {
 
 export interface DaemonIdentity {
     version: string;
-    developmentBuildId?: string;
 }
 
 export interface ReadyHealthResponse {

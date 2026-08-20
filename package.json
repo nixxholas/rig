@@ -7,13 +7,10 @@
         "build:gym": "pnpm --filter @slopus/rig-gym run build:image",
         "check": "pnpm --filter @slopus/happy-providers build && pnpm --filter @slopus/happy-agent-modules build && pnpm --filter @slopus/happy-agent-compute build && pnpm --filter @slopus/happy-agent build && pnpm --filter happy-plugins build && pnpm --filter happy-worklets build && pnpm run check:root && pnpm --recursive --filter './packages/**' run check",
         "check:root": "tsc --noEmit -p tsconfig.json",
-        "dev": "pnpm --filter @slopus/happy-providers build && pnpm --filter @slopus/happy-agent-modules build && pnpm --filter @slopus/happy-agent-compute build && pnpm --filter @slopus/happy-agent build && pnpm --filter happy-worklets build && pnpm --filter @slopus/rig-dev dev",
-        "dev2": "pnpm --filter @slopus/happy-providers build && pnpm --filter @slopus/happy-agent-modules build && pnpm --filter @slopus/happy-agent-compute build && pnpm --filter @slopus/happy-agent build && pnpm --filter @slopus/rig-dev dev2",
-        "dev2:global": "RIG_DEV2_GLOBAL=1 pnpm dev2",
-        "dev:global": "pnpm exec tsx packages/rig-dev/sources/global.ts",
+        "dev": "pnpm build && HAPPY_HOME_DIR=\"$PWD/.rig-dev/.happy\" pnpm start daemon reload && HAPPY_HOME_DIR=\"$PWD/.rig-dev/.happy\" pnpm start",
         "format": "oxfmt --write .",
         "format:check": "oxfmt --check .",
-        "link:dev": "cd packages/rig-dev && pnpm link --global",
+        "link:global": "pnpm build && cd packages/rig && pnpm link --global && rig daemon reload",
         "lint": "oxlint .",
         "observability:down": "node scripts/observability.mjs down",
         "observability:restart": "node scripts/observability.mjs restart",
@@ -29,7 +26,6 @@
         "release:happy-providers:patch": "pnpm release happy-providers patch",
         "release:happy-plugins:patch": "pnpm release happy-plugins patch",
         "start": "node packages/rig/dist/main.js",
-        "start:build": "pnpm build && pnpm start",
         "test": "pnpm --filter @slopus/happy-agent-modules build && pnpm --filter @slopus/happy-agent-compute build && pnpm run test:scripts && pnpm --recursive --filter './packages/**' run test",
         "test:release": "pnpm --filter @slopus/happy-agent-modules build && pnpm --filter @slopus/happy-agent-compute build && pnpm run test:scripts && pnpm --recursive --workspace-concurrency=1 --filter './packages/**' --filter '!happy-plugins' --filter '!@slopus/happy-providers' run test",
         "test:gym": "pnpm --filter @slopus/rig-gym-tests test:gym",
@@ -42,7 +38,7 @@
         "test:live": "pnpm --filter @slopus/rig test:live",
         "test:scripts": "TMPDIR=\"$PWD/.local\" tsx --test scripts/release/*.test.ts",
         "test:watch": "pnpm --filter @slopus/rig test:watch",
-        "unlink:dev": "pnpm remove --global @slopus/rig-dev"
+        "unlink:global": "pnpm remove --global @slopus/rig"
     },
     "devDependencies": {
         "@types/node": "^24.0.10",
