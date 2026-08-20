@@ -42,7 +42,7 @@ deployment that genuinely swaps how a machine is created. The first time a confi
 needs compute, it creates a separate host compute for that agent, caches it by agent ID, and gives
 that exact instance to the compute tools and skills discovery. A host injects the same
 `ComputeModule` into `SystemPromptModule` for AGENTS.md discovery. This package depends on
-`@slopus/happy-agent-compute@0.1.8` and uses its `Compute`, `ComputeFileSystem`, and `ComputeShell`
+`@slopus/happy-agent-compute@0.1.9` and uses its `Compute`, `ComputeFileSystem`, and `ComputeShell`
 types directly; it does not maintain a second filesystem or process contract. Docker and
 just-bash compute creation remain owned by that package and are not selected by this module's host
 integration.
