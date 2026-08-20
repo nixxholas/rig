@@ -1867,7 +1867,8 @@ show and clear the prompt in real time; aborting the run cancels an open questio
 
 ### `POST /v0/agents/:agentId/abort`
 
-Stops the current run.
+Stops the current run, every current descendant run, and every background process owned by the
+target or those descendants.
 
 Request:
 
@@ -1879,10 +1880,18 @@ Request:
   different active run is `409`, so a client cannot race a newer message and kill the wrong
   work.
 
-Response — `202`: `{ "agent": { ... }, "cursor": "..." }`. The abort is accepted; the run
-winding down and the agent going `"idle"` arrive through events from that cursor. Its terminal
-run has status `"aborted"` and reason `"abort"`. Aborting an idle agent is a no-op and answers
-the same way.
+Response — `202`: `{ "agent": { ... }, "cursor": "..." }`. The abort is accepted. Each affected
+run winds down with terminal status `"aborted"` and reason `"abort"`. For each affected agent
+that owns a running background process, Compute first commits a one-shot notice to that agent's
+scope in Compute's shared Agent KV saying what the abort killed. Process state and
+`process.exited` events then move immediately, and every affected process tree receives an
+immediate hard kill without a graceful shutdown period. Compute prepends the one-shot notice to
+that agent's next model inference through its instructions hook and consumes it there; it is not
+added to public history and does not queue a new conversation message.
+
+Aborting an idle agent still kills and records a notice for its background processes, as well as
+aborting any active descendant runs and their processes. It is a no-op only when the complete
+subtree has no active run and no running background process.
 
 ### `POST /v0/agents/:agentId/compact`
 
@@ -2328,8 +2337,10 @@ how a bootstrap snapshot and an event stream reconcile.
     - `process` (full process object) — `status` is `"running"`.
 - `process.updated` — a running process changed short of exiting.
     - `processId` (ID string), `previousVersion`, `version`, `changes`.
-- `process.exited` — the process ended, on its own or by `DELETE`. The terminal transition
-  travels as an ordinary update: `changes` carries `status`, `exitCode`, and `endedAt`.
+- `process.exited` — the process ended on its own, by `DELETE`, or because its agent subtree was
+  aborted. The terminal transition travels as an ordinary update: `changes` carries `status`,
+  `exitCode`, and `endedAt`. An abort records and emits this transition immediately before sending
+  the process tree its hard-kill signal.
     - `processId` (ID string), `previousVersion`, `version`, `changes`.
 
 **Questions**

@@ -11,6 +11,7 @@ export {
     agentComputeConfigSchema,
     hostComputeSchema,
     type AgentComputeConfig,
+    type ComputeAbortSnapshot,
     type HostCompute,
     type HostComputeProvider,
 } from "./ComputeModule.js";

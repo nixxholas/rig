@@ -149,6 +149,52 @@ describe("public activity and process API matrix", () => {
         }
     });
 
+    it("aborts an idle process, prepends its one-shot compute notice, and keeps history clean", async () => {
+        let agentId = "";
+        let agentCall = 0;
+        const followUpNotices: boolean[] = [];
+        const gym = await start({
+            inference: (request: GymInferenceRequest): GymTurn => {
+                if (request.sessionId !== agentId) return text("Abort process notice");
+                const call = agentCall;
+                agentCall += 1;
+                if (call === 0) return background("abortnotice");
+                if (call === 1) return text("The process is running.");
+                followUpNotices.push(
+                    request.instructions.includes(
+                        "The previous abort hard-killed 1 background process tree",
+                    ),
+                );
+                return text("Follow-up complete.");
+            },
+        });
+        agentId = gym.defaultSessionId;
+        await gym.send("Start a process that I will abort.", { permissionMode: "full_access" });
+        const activity = await runningProcess(gym);
+        const process = activity.processes.find((candidate) => candidate.status === "running");
+        if (process === undefined) throw new Error("The process was not projected.");
+
+        await gym.client.abortAgent(agentId, { mutationId: "matrix-abort-process" });
+        await gym.waitForEvent(
+            (event) =>
+                event.type === "process.exited" &&
+                event.payload.processId === process.id &&
+                event.payload.changes.status === "exited",
+            "aborted process exit",
+        );
+        expect((await gym.client.getAgentActivity(agentId)).processes).toContainEqual(
+            expect.objectContaining({ id: process.id, status: "exited" }),
+        );
+
+        await gym.send("Continue after the abort.");
+        await gym.send("Continue once more.");
+
+        expect(followUpNotices).toEqual([true, false]);
+        expect(JSON.stringify(await gym.client.getMessages(agentId))).not.toContain(
+            "The previous abort hard-killed",
+        );
+    });
+
     it("makes stopping an exited process idempotent", async () => {
         const gym = await start({ inference: [background("idempotent"), text("after")] });
         await gym.send("Start an idempotent process.", { wait: false });

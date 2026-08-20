@@ -1,5 +1,7 @@
 import type { AgentModule, AgentModuleHooks, AgentSystemRef } from "@slopus/happy-agent-base";
-import type { Context } from "@steve.kite/stdlib";
+import { afterCommit, type Context } from "@steve.kite/stdlib";
+
+import type { ComputeModule } from "../compute/index.js";
 
 /** The largest descendant tree one abort operation will hold in memory. */
 export const MAX_ABORT_CHAIN_AGENTS = 10_000;
@@ -14,8 +16,13 @@ export const MAX_ABORT_CHAIN_AGENTS = 10_000;
  */
 export class AbortModule implements AgentModule {
     readonly name = "abort";
+    readonly #compute: ComputeModule;
 
     #agents: AgentSystemRef | undefined;
+
+    constructor(compute: ComputeModule) {
+        this.#compute = compute;
+    }
 
     /** Immediately abort the target and every descendant without waiting for them to settle. */
     async abort(ctx: Context, agentId: string): Promise<void> {
@@ -25,9 +32,33 @@ export class AbortModule implements AgentModule {
             // A descendant can report its settlement to its parent. Release leaf cancellations
             // first so those reports arrive before the ancestor's cancellation and cannot reopen
             // an ancestor that was already signalled.
-            for (const targetAgentId of [...chain].reverse()) {
+            const leafFirst = [...chain].reverse();
+            for (const targetAgentId of leafFirst) {
+                await this.#compute.recordAbortNotice(txCtx, targetAgentId);
                 await agents.abort(txCtx, targetAgentId);
             }
+            // Register every run cancellation before the process cleanup. At commit the complete
+            // subtree is signalled first, then every compute advances its abort generation and
+            // hard-kills its process groups concurrently. An empty process snapshot is irrelevant:
+            // a command still crossing spawn observes the generation change and dies too.
+            afterCommit(txCtx, async (postCommitCtx) => {
+                await Promise.all(
+                    leafFirst.map(async (targetAgentId) => {
+                        try {
+                            await this.#compute.hardKillAgentProcesses(
+                                postCommitCtx,
+                                targetAgentId,
+                            );
+                        } catch (error: unknown) {
+                            postCommitCtx.log.error(
+                                "Abort could not hard-kill an agent's background processes.",
+                                { agentId: targetAgentId },
+                                error,
+                            );
+                        }
+                    }),
+                );
+            });
         });
     }
 

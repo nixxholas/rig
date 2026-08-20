@@ -47,12 +47,23 @@ output attached. Getting the rest is the model's job, through the same read it
 already has, and a finished process keeps answering that read for a while after
 it exits.
 
+An explicit agent abort is different. It covers the target agent and every
+descendant agent. Before their background processes are signalled, the compute
+module stores a one-shot notice for each affected agent in Compute's shared
+Agent KV, scoped by affected agent identity, saying what the abort killed. Once
+that write commits, process state moves to exited and every affected process
+tree is sent an immediate hard kill; abort has no graceful waiting period. On
+the agent's next inference, compute prepends the notice through its instructions
+hook and consumes it. The notice is not a public history message and does not
+create a queued conversation message.
+
 ## Lifetime
 
 A background process belongs to the session that started it, and it lives as
 long as that session's runtime lives inside the daemon.
 
-- Cancelling a turn does not kill background processes.
+- Aborting a turn kills every background process owned by that agent and every
+  descendant agent immediately, after storing their one-shot compute notices.
 - Recreating the session inside the same daemon does not keep them.
 - Archiving a session kills everything it started.
 - When the daemon exits, nothing it started survives.
@@ -83,8 +94,12 @@ emulator makes running commands slower, we do not do it.
 - A dev server started by an agent is still serving after the tool call
   returns, after the turn ends, and across later turns.
 - Reaching the timeout backgrounds a command; it never kills it.
-- Cancelling a turn leaves background processes running; archiving a session
-  and exiting the daemon leave none.
+- Aborting a turn stores a one-shot notice in Compute's shared Agent KV for
+  every affected agent and immediately hard-kills the complete process trees
+  owned by that agent and every descendant agent. Compute prepends the notice
+  to that agent's next inference and consumes it without adding it to public
+  history.
+- Archiving a session and exiting the daemon leave no background processes.
 - Stopping a process is graceful first and forceful after about two seconds,
   and it takes the whole process tree.
 - Every provider — Codex, Claude, Grok, Pi — can run in the background, stop a

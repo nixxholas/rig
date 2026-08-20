@@ -16,6 +16,8 @@ import {
     interruptAgentTool,
     sendMessageTool,
 } from "../../sources/collaboration/index.js";
+import { ComputeModule } from "../../sources/compute/index.js";
+import { testConfig } from "../support/computeModule.js";
 import { resolveModuleHooks } from "../support/moduleHooks.js";
 
 const MODELS: readonly AgentModel[] = [
@@ -132,7 +134,7 @@ class Collection {
 async function started(
     collection: Collection,
 ): Promise<{ module: CollaborationModule; hooks: AgentModuleHooks; ctx: Context }> {
-    const abort = new AbortModule();
+    const abort = abortModule();
     vi.spyOn(abort, "abort").mockImplementation(
         async (ctx, agentId) => await collection.abort(ctx, agentId),
     );
@@ -149,6 +151,10 @@ async function started(
     });
     const hooks = await resolveModuleHooks(ctx, module, collection.asRef());
     return { module, hooks, ctx };
+}
+
+function abortModule(): AbortModule {
+    return new AbortModule(new ComputeModule(testConfig));
 }
 
 /** A stand-in run store; the module only ever keeps one note in it. */
@@ -823,7 +829,7 @@ describe("collaboration", () => {
     });
 
     it("describes the offered model/provider pairs without a dynamic capacity lookup", () => {
-        const module = new CollaborationModule(new AbortModule());
+        const module = new CollaborationModule(abortModule());
         const create = createAgentTool(module, "parent", MODELS);
         const empty = createAgentTool(module, "parent", []);
 
@@ -897,7 +903,7 @@ describe("collaboration", () => {
         // so this module owns no table. The released keys stay because Agent Base requires the
         // applied migrations to remain a prefix of the declared ones — drop one of these and
         // every database that ran an earlier build refuses to open.
-        expect(new CollaborationModule(new AbortModule()).migrations.map(([key]) => key)).toEqual([
+        expect(new CollaborationModule(abortModule()).migrations.map(([key]) => key)).toEqual([
             "001-collaboration",
             "002-drop-collaboration-receipts",
             "003-collaboration-run-state",
@@ -906,7 +912,7 @@ describe("collaboration", () => {
     });
 
     it("refuses to work before the agent collection is available", async () => {
-        const module = new CollaborationModule(new AbortModule());
+        const module = new CollaborationModule(abortModule());
         const ctx = createRootContext().named("unstarted");
 
         await expect(module.createAgent(ctx, "parent", TASK, "child")).rejects.toThrow(

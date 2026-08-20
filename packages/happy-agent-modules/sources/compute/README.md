@@ -33,7 +33,10 @@ const agent = await system.create(ctx, {
 `createComputeModules` pairs the one `ComputeModule` with the `SkillsModule` that reads its
 machines, as the set the whole agent system installs. `ComputeModule` takes only `ConfigModule`:
 it derives its host policy — the agent's private directories, the project files a write must be
-reviewed for — from the configuration itself, and uses the published default host provider.
+reviewed for — from the configuration itself, and creates the published host compute around a
+process manager it retains for the agent's whole machine lifetime. Retaining that manager is what
+lets abort signal every process group directly, including a detached tree whose launching shell
+already exited.
 `ComputeModule.withProvider(config, provider)` is the one alternate construction, for a test or a
 deployment that genuinely swaps how a machine is created. The first time a configured agent
 needs compute, it creates a separate host compute for that agent, caches it by agent ID, and gives
@@ -167,6 +170,15 @@ top) and the tail for a command (whose newest lines say how it went).
   there was one still running to stop. These two together are how a module that tightens an
   agent's permission mode ends what is still running under the wider one: it asks for the commands
   and asks for them to be stopped, rather than being handed a way to end them.
+- `abortSnapshot(agentId)` — captures the live sessions and retained process-tree count used to
+  write an abort notice.
+- `recordAbortNotice(ctx, agentId)` — writes one validated one-shot notice to the agent's scope in
+  Compute's shared KV inside the abort transaction. The instructions hook prepends it to the next
+  inference, and the inference-start transaction consumes that exact notice without putting it in
+  public history.
+- `hardKillAgentProcesses(ctx, agentId)` — immediately marks public process records exited and
+  sends `SIGKILL` to every retained operating-system process group. It advances an abort generation
+  so a session whose spawn finishes across that boundary is killed as well.
 - `reviewerTools(ctx, scope)` — the fixed read-only tool array the automatic permission reviewer
   investigates local state with, built for the vendor the reviewer's own model route selects. The
   reviewer's machine is one per installation, created in this installation's working folder on
@@ -184,18 +196,24 @@ Also exported from the package: `computeToolVendor`, `computeToolSelectionSchema
 (`assembleClaudeComputeTools`, `assembleCodexComputeTools`, `assembleGrokComputeTools`) for a host
 that needs one vendor's array directly.
 
-Archiving one agent disposes only that agent's cached compute. A cancelled turn or idle agent does
+Archiving one agent disposes only that agent's cached compute. An explicit abort keeps the compute
+cached for later turns but hard-kills every process it owns; an ordinary settled or idle turn does
 not dispose it.
 
 ## Storage
 
-The only state this module persists is `FileReadLog` (`../impl/FileReadLog.ts`), one per agent, kept
-in the `AgentKV` the agent lends the module through `scope.kv` (`module.compute` scope). It holds
-a single key:
+The module persists `FileReadLog` (`../impl/FileReadLog.ts`) in the per-agent `AgentKV` supplied
+through `scope.kv`, and keeps every agent's one-shot abort notice in the one collection-wide
+`scope.sharedKV` owned by Compute. It holds these keys:
 
 - `"reads"` → an array of `{ path: string, mtimeMs: number }`, oldest first, validated against a
   TypeBox schema on read (`Value.Check`); anything that fails validation, such as a log written by
   an older version, is treated as empty rather than blocking every edit.
+- `"abort-notices.<agent ID>.pending"` in shared KV → the validated process-tree count and bounded
+  live-session descriptions from the most recent abort that killed something. It is overwritten
+  by a newer abort, prepended by the instructions hook, and deleted in the transaction that starts
+  that inference. Creation and archival also clear that identity's scope so a reused ID cannot
+  inherit an old notice.
 
 `record(ctx, path, mtimeMs)` removes any existing entry for `path`, appends the new one, and keeps
 only the most recent 512 entries (`MAX_REMEMBERED_READS`) — the log is a guard against a blind

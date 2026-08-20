@@ -1,5 +1,6 @@
 import {
     agentModuleConfig,
+    type AgentKV,
     type AgentModule,
     type AgentModuleHooks,
     type AgentModuleScope,
@@ -7,14 +8,19 @@ import {
     type AnyAgentTool,
 } from "@slopus/happy-agent-base";
 import {
+    createHostCompute,
+    HOST_SESSION_STOP_GRACE_MS,
     hostComputeProvider,
+    killProcessGroup,
+    NativeProcessManager,
     type Compute,
     type ComputeHostPolicy,
     type HostComputeConfig,
 } from "@slopus/happy-agent-compute";
+import { createId } from "@paralleldrive/cuid2";
 import { Type, type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
-import { mapAsyncLock, type Context, type MapAsyncLock } from "@steve.kite/stdlib";
+import { detach, mapAsyncLock, type Context, type MapAsyncLock } from "@steve.kite/stdlib";
 
 import type { ConfigModule } from "../config/index.js";
 import { FileReadLog } from "../impl/FileReadLog.js";
@@ -51,6 +57,29 @@ const REVIEWER_COMPUTE_KEY = "\u0000permission-reviewer";
 const exact = { additionalProperties: false } as const;
 const callableSchema = Type.Function([], Type.Any());
 const contextSchema = Type.Unsafe<Context>(Type.Object({}, { additionalProperties: true }));
+const MAX_ABORT_NOTICE_SESSIONS = 16;
+const MAX_ABORT_NOTICE_COMMAND_LENGTH = 1_000;
+const computeAbortNoticeSchema = Type.Object(
+    {
+        id: Type.String({ minLength: 1, maxLength: 128, pattern: "^[a-z0-9]+$" }),
+        killedAt: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
+        processTrees: Type.Integer({ minimum: 1, maximum: 10_000 }),
+        sessions: Type.Array(
+            Type.Object(
+                {
+                    command: Type.String({ maxLength: MAX_ABORT_NOTICE_COMMAND_LENGTH }),
+                    sessionId: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
+                },
+                exact,
+            ),
+            { maxItems: MAX_ABORT_NOTICE_SESSIONS },
+        ),
+    },
+    exact,
+);
+type ComputeAbortNotice = Static<typeof computeAbortNoticeSchema>;
+const ABORT_NOTICES_SCOPE = "abort-notices";
+const ABORT_NOTICE_KEY = "pending";
 
 const computeFileSystemSchema = Type.Object(
     {
@@ -138,8 +167,17 @@ const hostComputeProviderSchema = Type.Object(
 export type HostComputeProvider = Pick<typeof hostComputeProvider, "id" | "create">;
 
 interface CachedCompute {
+    abortGeneration: number;
     readonly cwd: string;
     readonly compute: HostCompute;
+    readonly processContext: Context;
+    readonly processManager: NativeProcessManager | undefined;
+}
+
+/** Running work visible at the instant an agent subtree is aborted. */
+export interface ComputeAbortSnapshot {
+    readonly processGroups: number;
+    readonly sessions: readonly ComputeSessionActivity[];
 }
 
 /**
@@ -157,9 +195,10 @@ interface CachedCompute {
 export class ComputeModule implements AgentModule {
     readonly name = "compute";
     readonly #config: ConfigModule;
-    /** Settled at construction: the ordinary constructor or {@link ComputeModule.withProvider}. */
-    #provider: HostComputeProvider;
+    /** Present only for the named alternate construction used by scripted machines. */
+    #provider: HostComputeProvider | undefined;
     readonly #computes = new Map<string, CachedCompute>();
+    readonly #promptedAbortNotices = new Map<string, string>();
     readonly #computeLocks: MapAsyncLock<string> = mapAsyncLock<string>();
     readonly #activeOperations = new Set<Promise<unknown>>();
     readonly #processes = new ComputeProcessRegistry();
@@ -174,12 +213,14 @@ export class ComputeModule implements AgentModule {
     readonly #reviewerReadLocks: MapAsyncLock<string> = mapAsyncLock<string>();
     /** The one machine the automatic permission reviewer investigates local state through. */
     #reviewer: HostCompute | undefined;
+    /** Compute's one durable store shared by every agent in this collection. */
+    #sharedKV: AgentKV | undefined;
     #closed = false;
     #disposePromise: Promise<void> | undefined;
 
     constructor(config: ConfigModule) {
         this.#config = config;
-        this.#provider = hostComputeProvider;
+        this.#provider = undefined;
     }
 
     /**
@@ -210,29 +251,39 @@ export class ComputeModule implements AgentModule {
         }
         const config = raw as AgentComputeConfig;
         const providerId = config.providerId ?? "host";
-        if (providerId !== this.#provider.id) {
+        const configuredProviderId = this.#provider?.id ?? "host";
+        if (providerId !== configuredProviderId) {
             throw new Error(
-                `Agent requested compute provider "${providerId}", but "${this.#provider.id}" is configured.`,
+                `Agent requested compute provider "${providerId}", but "${configuredProviderId}" is configured.`,
             );
         }
 
         return await this.#track(
             this.#computeLocks.runInLock(ctx, agentId, async (lockCtx) => {
                 if (this.#closed) throw new Error("Compute module is closed.");
-                const cached = this.#computes.get(agentId);
-                if (cached !== undefined) {
-                    if (cached.cwd !== config.cwd) {
+                const existing = this.#computes.get(agentId);
+                if (existing !== undefined) {
+                    if (existing.cwd !== config.cwd) {
                         throw new Error("An agent's cached compute configuration cannot change.");
                     }
-                    return cached.compute;
+                    return existing.compute;
                 }
 
-                const compute = await this.#create(lockCtx, config);
+                const created = await this.#create(lockCtx, config, `compute.agent.${agentId}`);
+                const { compute } = created;
                 if (this.#closed) {
                     await compute.dispose(lockCtx);
                     throw new Error("Compute module is closed.");
                 }
-                this.#computes.set(agentId, { cwd: config.cwd, compute });
+                const cached: CachedCompute = {
+                    abortGeneration: 0,
+                    cwd: config.cwd,
+                    compute,
+                    processContext: created.processContext,
+                    processManager: created.processManager,
+                };
+                this.#guardSessionStarts(agentId, cached);
+                this.#computes.set(agentId, cached);
                 this.#processes.attach(agentId, compute);
                 return compute;
             }),
@@ -260,6 +311,60 @@ export class ComputeModule implements AgentModule {
     runningCommands(agentId: string): readonly ComputeSessionActivity[] {
         const compute = this.#computes.get(agentId)?.compute;
         return compute?.shell.activeSessions?.() ?? [];
+    }
+
+    /** Capture the process trees an abort notice will describe before its transaction commits. */
+    abortSnapshot(agentId: string): ComputeAbortSnapshot {
+        const cached = this.#computes.get(agentId);
+        if (cached === undefined) return { processGroups: 0, sessions: [] };
+        const sessions = cached.compute.shell.activeSessions?.() ?? [];
+        return {
+            processGroups: cached.processManager?.reapableCount() ?? sessions.length,
+            sessions: structuredClone(sessions) as ComputeSessionActivity[],
+        };
+    }
+
+    /** Durably remember what this abort is about to kill for the agent's next model request. */
+    async recordAbortNotice(ctx: Context, agentId: string): Promise<ComputeAbortSnapshot> {
+        const snapshot = this.abortSnapshot(agentId);
+        await this.#storeAbortNotice(ctx, agentId, snapshot);
+        return snapshot;
+    }
+
+    async #storeAbortNotice(
+        ctx: Context,
+        agentId: string,
+        snapshot: ComputeAbortSnapshot,
+    ): Promise<void> {
+        const processTrees = Math.max(snapshot.processGroups, snapshot.sessions.length);
+        if (processTrees === 0) return;
+        const sharedKV = this.#sharedKV;
+        if (sharedKV === undefined) {
+            throw new Error("Compute cannot record an abort notice before its shared KV exists.");
+        }
+        const notice: ComputeAbortNotice = {
+            id: createId(),
+            killedAt: Date.now(),
+            processTrees,
+            sessions: snapshot.sessions
+                .slice(0, MAX_ABORT_NOTICE_SESSIONS)
+                .map(({ command, sessionId }) => ({
+                    command: boundedAbortNoticeCommand(command),
+                    sessionId,
+                })),
+        };
+        if (!Value.Check(computeAbortNoticeSchema, notice)) {
+            throw new Error("Compute produced an invalid abort notice.");
+        }
+        await abortNoticeStore(sharedKV, agentId).write(ctx, ABORT_NOTICE_KEY, notice);
+    }
+
+    /** Immediately mark and hard-kill every process tree owned by one agent compute. */
+    async hardKillAgentProcesses(ctx: Context, agentId: string): Promise<void> {
+        const cached = this.#computes.get(agentId);
+        if (cached === undefined) return;
+        cached.abortGeneration += 1;
+        await this.#hardKillCached(ctx, agentId, cached);
     }
 
     /** Read command output without advancing the model's output cursor. */
@@ -298,6 +403,7 @@ export class ComputeModule implements AgentModule {
 
     /** Ends one archived agent's machine and every background process it still owns. */
     async archiveAgent(ctx: Context, agentId: string): Promise<void> {
+        this.#promptedAbortNotices.delete(agentId);
         await this.#track(
             this.#computeLocks.runInLock(ctx, agentId, async (lockCtx) => {
                 if (this.#closed) return;
@@ -381,6 +487,8 @@ export class ComputeModule implements AgentModule {
             await Promise.allSettled([...this.#activeOperations]);
             const cached = [...this.#computes.values()];
             this.#computes.clear();
+            this.#promptedAbortNotices.clear();
+            this.#sharedKV = undefined;
             const reviewer = this.#reviewer;
             this.#reviewer = undefined;
             await Promise.all([
@@ -423,9 +531,13 @@ export class ComputeModule implements AgentModule {
                 if (this.#closed) throw new Error("Compute module is closed.");
                 const cached = this.#reviewer;
                 if (cached !== undefined) return cached;
-                const compute = await this.#create(lockCtx, {
-                    cwd: this.#config.configuration.paths.publicHome,
-                });
+                const { compute } = await this.#create(
+                    lockCtx,
+                    {
+                        cwd: this.#config.configuration.paths.publicHome,
+                    },
+                    "compute.permission-reviewer",
+                );
                 if (this.#closed) {
                     await compute.dispose(lockCtx);
                     throw new Error("Compute module is closed.");
@@ -438,15 +550,77 @@ export class ComputeModule implements AgentModule {
 
     readonly #hooks: AgentModuleHooks = {
         instructions: async (ctx: Context, scope: AgentModuleScope): Promise<string> => {
+            // Agent Base always supplies the shared store. Keeping this guard preserves the hook's
+            // use in small host-side probes that only ask for static vendor instructions.
+            const sharedKV = scope.sharedKV;
+            if (sharedKV !== undefined) this.#sharedKV = sharedKV;
             const compute = await this.resolve(ctx, scope.agent.id);
-            return compute === undefined ? "" : computeInstructionsForVendor(vendorFor(scope));
+            if (compute === undefined) return "";
+            const rawNotice =
+                sharedKV === undefined
+                    ? undefined
+                    : await abortNoticeStore(sharedKV, scope.agent.id).read(ctx, ABORT_NOTICE_KEY);
+            let notice = "";
+            if (rawNotice === undefined) {
+                this.#promptedAbortNotices.delete(scope.agent.id);
+            } else {
+                if (!Value.Check(computeAbortNoticeSchema, rawNotice)) {
+                    throw new Error("Stored compute abort notice is invalid.");
+                }
+                const parsed = rawNotice as ComputeAbortNotice;
+                this.#promptedAbortNotices.set(scope.agent.id, parsed.id);
+                notice = formatAbortNotice(parsed);
+            }
+            return [notice, computeInstructionsForVendor(vendorFor(scope))]
+                .filter((part) => part.length > 0)
+                .join("\n\n");
         },
 
         tools: async (ctx: Context, scope: AgentModuleScope): Promise<readonly AnyAgentTool[]> => {
+            this.#sharedKV = scope.sharedKV;
             const compute = await this.resolve(ctx, scope.agent.id);
             if (compute === undefined) return [];
             const reads = new FileReadLog(scope.kv, this.#readLocks, scope.agent.id);
             return assembleComputeTools(vendorFor(scope), compute, reads);
+        },
+
+        beforeInferenceTransact: async (ctx: Context, scope: AgentModuleScope): Promise<void> => {
+            this.#sharedKV = scope.sharedKV;
+            const promptedId = this.#promptedAbortNotices.get(scope.agent.id);
+            if (promptedId === undefined) return;
+            const store = abortNoticeStore(scope.sharedKV, scope.agent.id);
+            const rawNotice = await store.read(ctx, ABORT_NOTICE_KEY);
+            if (rawNotice !== undefined && !Value.Check(computeAbortNoticeSchema, rawNotice)) {
+                throw new Error("Stored compute abort notice is invalid.");
+            }
+            if (rawNotice !== undefined && rawNotice.id === promptedId) {
+                await store.delete(ctx, ABORT_NOTICE_KEY);
+            }
+            if (this.#promptedAbortNotices.get(scope.agent.id) === promptedId) {
+                this.#promptedAbortNotices.delete(scope.agent.id);
+            }
+        },
+
+        agentCreatedTransact: async (
+            ctx: Context,
+            scope: AgentModuleSystemScope,
+            agent: { readonly id: string },
+        ): Promise<void> => {
+            this.#sharedKV = scope.sharedKV;
+            await abortNoticeStore(scope.sharedKV, agent.id).delete(ctx, ABORT_NOTICE_KEY);
+        },
+
+        agentRestoredTransact: (_ctx: Context, scope: AgentModuleSystemScope): void => {
+            this.#sharedKV = scope.sharedKV;
+        },
+
+        agentArchivedTransact: async (
+            ctx: Context,
+            scope: AgentModuleSystemScope,
+            agent: { readonly id: string },
+        ): Promise<void> => {
+            this.#sharedKV = scope.sharedKV;
+            await abortNoticeStore(scope.sharedKV, agent.id).delete(ctx, ABORT_NOTICE_KEY);
         },
 
         agentArchived: async (
@@ -493,12 +667,30 @@ export class ComputeModule implements AgentModule {
         };
     }
 
-    async #create(ctx: Context, config: AgentComputeConfig): Promise<HostCompute> {
+    async #create(
+        ctx: Context,
+        config: AgentComputeConfig,
+        lifetimeName: string,
+    ): Promise<{
+        readonly compute: HostCompute;
+        readonly processContext: Context;
+        readonly processManager: NativeProcessManager | undefined;
+    }> {
         const providerConfig: HostComputeConfig = {
             cwd: config.cwd,
             hostPolicy: this.hostPolicy,
         };
-        const compute = await this.#provider.create(ctx, providerConfig);
+        const processContext = detach(ctx).named(lifetimeName);
+        const processManager =
+            this.#provider === undefined ? new NativeProcessManager(processContext) : undefined;
+        const compute =
+            processManager === undefined
+                ? await this.#provider!.create(ctx, providerConfig)
+                : createHostCompute({
+                      ctx: processContext,
+                      ...providerConfig,
+                      processManager,
+                  });
         const candidate = runtimeCompute(compute);
         if (!Value.Check(hostComputeSchema, candidate)) {
             if (typeof compute.dispose === "function") await compute.dispose(ctx);
@@ -512,8 +704,90 @@ export class ComputeModule implements AgentModule {
             await compute.dispose(ctx);
             throw new Error("Host compute provider returned mismatched working directories.");
         }
-        return compute as HostCompute;
+        const hostCompute = compute as HostCompute;
+        if (processManager === undefined) {
+            return { compute: hostCompute, processContext, processManager: undefined };
+        }
+        const originalDispose = hostCompute.dispose.bind(hostCompute);
+        hostCompute.dispose = async (disposeCtx: Context): Promise<void> => {
+            await originalDispose(disposeCtx);
+            await processManager.killAll(processContext, {
+                forceAfterMs: HOST_SESSION_STOP_GRACE_MS,
+                includeDetached: true,
+            });
+        };
+        return { compute: hostCompute, processContext, processManager };
     }
+
+    /** A process whose spawn crosses an abort boundary is part of that abort, not the next turn. */
+    #guardSessionStarts(agentId: string, cached: CachedCompute): void {
+        const shell = cached.compute.shell;
+        const originalStart = shell.startSession;
+        shell.startSession = async (options) => {
+            const generation = cached.abortGeneration;
+            const sessionId = await originalStart.call(shell, options);
+            if (cached.abortGeneration !== generation) {
+                try {
+                    await this.#storeAbortNotice(
+                        cached.processContext,
+                        agentId,
+                        this.abortSnapshot(agentId),
+                    );
+                } catch (error: unknown) {
+                    cached.processContext.log.error(
+                        "Compute could not record a late abort process notice.",
+                        { agentId },
+                        error,
+                    );
+                }
+                await this.#hardKillCached(cached.processContext, agentId, cached);
+            }
+            return sessionId;
+        };
+    }
+
+    /** Make public state terminal first, then send an uncatchable signal to every whole group. */
+    async #hardKillCached(ctx: Context, agentId: string, cached: CachedCompute): Promise<void> {
+        this.#processes.exitAll(agentId, cached.compute);
+        const processManager = cached.processManager;
+        if (processManager === undefined) {
+            await cached.compute.shell.killAllSessions?.();
+            return;
+        }
+        const processGroups = [...processManager.pendingProcessGroups()];
+        await Promise.all(
+            processGroups.map(
+                async (processGroupId) => await killProcessGroup(ctx, processGroupId, "SIGKILL"),
+            ),
+        );
+    }
+}
+
+/** One-shot system-prompt prefix for the first inference after an abort killed processes. */
+function formatAbortNotice(notice: ComputeAbortNotice): string {
+    const processWord = notice.processTrees === 1 ? "tree" : "trees";
+    const sessionLines = notice.sessions.map(
+        ({ command, sessionId }) =>
+            `- shell session ${String(sessionId)}: ${JSON.stringify(command)}`,
+    );
+    const omitted = Math.max(0, notice.processTrees - notice.sessions.length);
+    return [
+        `The previous abort hard-killed ${String(notice.processTrees)} background process ${processWord} owned by this agent with SIGKILL.`,
+        ...sessionLines,
+        ...(omitted === 0
+            ? []
+            : [`- ${String(omitted)} additional process ${omitted === 1 ? "tree" : "trees"}`]),
+    ].join("\n");
+}
+
+function boundedAbortNoticeCommand(command: string): string {
+    if (command.length <= MAX_ABORT_NOTICE_COMMAND_LENGTH) return command;
+    return `${command.slice(0, MAX_ABORT_NOTICE_COMMAND_LENGTH - 1)}…`;
+}
+
+/** One affected agent's namespace inside Compute's collection-wide durable store. */
+function abortNoticeStore(sharedKV: AgentKV, agentId: string): AgentKV {
+    return sharedKV.scoped(ABORT_NOTICES_SCOPE, agentId);
 }
 
 /** Whose tools this agent's model was trained on, which is what it should be handed. */

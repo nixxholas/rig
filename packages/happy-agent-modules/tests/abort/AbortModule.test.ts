@@ -3,6 +3,8 @@ import { afterCommit, type Context } from "@steve.kite/stdlib";
 import { describe, expect, it } from "vitest";
 
 import { AbortModule } from "../../sources/abort/index.js";
+import { ComputeModule, type ComputeAbortSnapshot } from "../../sources/compute/index.js";
+import { testConfig } from "../support/computeModule.js";
 import { moduleDatabase } from "../support/moduleDatabase.js";
 import { resolveModuleHooks } from "../support/moduleHooks.js";
 
@@ -30,12 +32,49 @@ class Collection {
     }
 }
 
+class AbortCompute extends ComputeModule {
+    readonly timeline: string[] = [];
+    readonly hardKillCalls: string[] = [];
+    readonly hardKilled: string[] = [];
+    readonly notices: string[] = [];
+    readonly snapshots = new Map<string, ComputeAbortSnapshot>();
+
+    constructor() {
+        super(testConfig);
+    }
+
+    override abortSnapshot(agentId: string): ComputeAbortSnapshot {
+        return this.snapshots.get(agentId) ?? { processGroups: 0, sessions: [] };
+    }
+
+    override async recordAbortNotice(ctx: Context, agentId: string): Promise<ComputeAbortSnapshot> {
+        const snapshot = this.abortSnapshot(agentId);
+        if (snapshot.processGroups > 0 || snapshot.sessions.length > 0) {
+            afterCommit(ctx, () => {
+                this.notices.push(agentId);
+                this.timeline.push(`notice:${agentId}`);
+            });
+        }
+        return snapshot;
+    }
+
+    override async hardKillAgentProcesses(_ctx: Context, agentId: string): Promise<void> {
+        this.hardKillCalls.push(agentId);
+        this.timeline.push(`kill:${agentId}`);
+        const snapshot = this.abortSnapshot(agentId);
+        if (snapshot.processGroups > 0 || snapshot.sessions.length > 0) {
+            this.hardKilled.push(agentId);
+        }
+    }
+}
+
 async function started(name: string, collection: Collection) {
+    const compute = new AbortCompute();
     const database = moduleDatabase([], name);
     await database.ready;
-    const abort = new AbortModule();
+    const abort = new AbortModule(compute);
     await resolveModuleHooks(database.context, abort, collection.asRef());
-    return { abort, database };
+    return { abort, compute, database };
 }
 
 function seedTree(collection: Collection): void {
@@ -54,6 +93,52 @@ describe("AbortModule", () => {
             expect(collection.aborted).toEqual(["grandchild", "child-b", "child-a", "root"]);
             expect(new Set(collection.databases).size).toBe(1);
             expect(collection.databases[0]).not.toBe(database.database);
+        } finally {
+            database.close();
+        }
+    });
+
+    it("records compute notices before hard-killing every affected process owner", async () => {
+        const collection = new Collection();
+        seedTree(collection);
+        const { abort, compute, database } = await started("abort-process-chain", collection);
+        compute.snapshots.set("root", {
+            processGroups: 1,
+            sessions: [
+                {
+                    command: "pnpm dev",
+                    cwd: "/workspace",
+                    sessionId: 7,
+                    status: "running",
+                },
+            ],
+        });
+        compute.snapshots.set("grandchild", {
+            processGroups: 2,
+            sessions: [
+                {
+                    command: "pnpm test --watch",
+                    cwd: "/workspace",
+                    sessionId: 3,
+                    status: "running",
+                },
+            ],
+        });
+
+        try {
+            await abort.abort(database.context, "root");
+
+            expect(compute.hardKillCalls).toEqual(["grandchild", "child-b", "child-a", "root"]);
+            expect(compute.hardKilled).toEqual(["grandchild", "root"]);
+            expect(compute.notices).toEqual(["grandchild", "root"]);
+            expect(compute.timeline).toEqual([
+                "notice:grandchild",
+                "notice:root",
+                "kill:grandchild",
+                "kill:child-b",
+                "kill:child-a",
+                "kill:root",
+            ]);
         } finally {
             database.close();
         }
@@ -79,7 +164,7 @@ describe("AbortModule", () => {
     it("drops every queued cancellation when the outer transaction rolls back", async () => {
         const collection = new Collection();
         seedTree(collection);
-        const { abort, database } = await started("abort-chain-rollback", collection);
+        const { abort, compute, database } = await started("abort-chain-rollback", collection);
         try {
             await expect(
                 database.context.inTx(async (txCtx) => {
@@ -88,6 +173,8 @@ describe("AbortModule", () => {
                 }),
             ).rejects.toThrow("roll back");
             expect(collection.aborted).toEqual([]);
+            expect(compute.notices).toEqual([]);
+            expect(compute.hardKillCalls).toEqual([]);
         } finally {
             database.close();
         }
@@ -97,10 +184,15 @@ describe("AbortModule", () => {
         const collection = new Collection();
         seedTree(collection);
         collection.abortFailureAgentId = "child-b";
-        const { abort, database } = await started("abort-chain-target-failure", collection);
+        const { abort, compute, database } = await started(
+            "abort-chain-target-failure",
+            collection,
+        );
         try {
             await expect(abort.abort(database.context, "root")).rejects.toThrow("abort failed");
             expect(collection.aborted).toEqual([]);
+            expect(compute.notices).toEqual([]);
+            expect(compute.hardKillCalls).toEqual([]);
         } finally {
             database.close();
         }
@@ -125,9 +217,9 @@ describe("AbortModule", () => {
         const database = moduleDatabase([], "abort-chain-unstarted");
         await database.ready;
         try {
-            await expect(new AbortModule().abort(database.context, "root")).rejects.toThrow(
-                "has not been started yet",
-            );
+            await expect(
+                new AbortModule(new AbortCompute()).abort(database.context, "root"),
+            ).rejects.toThrow("has not been started yet");
         } finally {
             database.close();
         }

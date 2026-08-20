@@ -3,7 +3,7 @@
 Lets one agent put another to work.
 
 ```ts
-const abort = new AbortModule();
+const abort = new AbortModule(compute);
 new CollaborationModule(abort);
 ```
 
@@ -144,10 +144,11 @@ own — so whatever shows a person their agents names it the same way it names e
 | -------------------- | --------------------------------------------------------------- |
 | `create_agent`       | Creates a collaborator and delivers its opening task.           |
 | `send_agent_message` | Delivers one message to a collaborator, or back to its creator. |
-| `interrupt_agent`    | Immediately aborts a collaborator and every running descendant. |
+| `interrupt_agent`    | Aborts a collaborator subtree and hard-kills its processes.     |
 
-`interrupt_agent` is reviewed in Auto mode; the other two are not. It returns as soon as the abort
-signals are issued and never waits for any run to settle.
+`interrupt_agent` is reviewed in Auto mode; the other two are not. Before process trees receive
+their immediate hard kill, Compute stores a one-shot notice for each affected process owner and
+prepends it to that agent's next inference. The tool never waits for any run to settle.
 
 ## Host operations
 

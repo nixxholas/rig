@@ -280,7 +280,7 @@ export async function startHappyAgentRuntime(
 
         const profile = new ProfileModule<LibSQLDatabase>();
         const murmur = new MurmurModule<LibSQLDatabase>(config, profile);
-        const abort = new AbortModule();
+        const abort = new AbortModule(compute.computeModule);
         const collaboration = new CollaborationModule(abort);
         const scheduling = new SchedulingModule();
         const userInput = new UserInputModule(presence);

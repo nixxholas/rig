@@ -4,6 +4,8 @@ import { describe, expect, it } from "vitest";
 
 import { AbortModule } from "../../sources/abort/index.js";
 import { CollaborationModule } from "../../sources/collaboration/index.js";
+import { ComputeModule } from "../../sources/compute/index.js";
+import { testConfig } from "../support/computeModule.js";
 import { moduleDatabase } from "../support/moduleDatabase.js";
 
 describe("collaboration migrations", () => {
@@ -28,7 +30,8 @@ describe("collaboration migrations", () => {
                 sql`CREATE TABLE happy_collaboration_receipts (id TEXT)`,
             );
 
-            const remove = new CollaborationModule(new AbortModule()).migrations[3]![1];
+            const remove = new CollaborationModule(new AbortModule(new ComputeModule(testConfig)))
+                .migrations[3]![1];
             await remove(database.context, database.database);
             await remove(database.context, database.database);
 

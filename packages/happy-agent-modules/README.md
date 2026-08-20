@@ -143,7 +143,7 @@ its public methods, and its storage and event contracts.
 | [Search](sources/search/README.md)                    | A bounded common `web_fetch` plus explicit per-vendor search tool wrappers.                                                                              |
 | [Image generation](sources/imageGeneration/README.md) | Prompt-to-PNG on the configured Codex accounts, including edits from local paths or recent conversation images.                                          |
 | [Gemini](sources/gemini/README.md)                    | Image and music generation and questions about local media files, on a Gemini key of its own.                                                            |
-| [Git](sources/git/README.md)                          | Reading, probing, and watching repositories, and the worktree and clone actions the catalogs perform. No hooks, no tools.                               |
+| [Git](sources/git/README.md)                          | Reading, probing, and watching repositories, and the worktree and clone actions the catalogs perform. No hooks, no tools.                                |
 
 ### Work
 
@@ -158,14 +158,14 @@ its public methods, and its storage and event contracts.
 
 ### People and other agents
 
-| Module                                           | What it adds                                                                                         |
-| ------------------------------------------------ | ---------------------------------------------------------------------------------------------------- |
-| [Abort](sources/abort/README.md)                 | One transactional cancellation across an agent and every recursively linked descendant.              |
-| [Collaboration](sources/collaboration/README.md) | Create collaborators and message them asynchronously, with a report to the creator when one stops.   |
-| [User input](sources/userInput/README.md)        | Questions an agent asks a person, and a durable wait for the answer that survives a restart.         |
-| [Presence](sources/presence/README.md)           | Configured versus effective availability, custom and temporary states, schedules, and status events. |
-| [Profile](sources/profile/README.md)             | The one person this installation belongs to, and the machine that may speak for them.                |
-| [Murmur](sources/murmur/README.md)               | Contacts over one Murmur identity, and the requests either side is waiting on.                       |
+| Module                                           | What it adds                                                                                            |
+| ------------------------------------------------ | ------------------------------------------------------------------------------------------------------- |
+| [Abort](sources/abort/README.md)                 | Transactional subtree cancellation with one-shot compute notices and immediate process-tree hard kills. |
+| [Collaboration](sources/collaboration/README.md) | Create collaborators and message them asynchronously, with a report to the creator when one stops.      |
+| [User input](sources/userInput/README.md)        | Questions an agent asks a person, and a durable wait for the answer that survives a restart.            |
+| [Presence](sources/presence/README.md)           | Configured versus effective availability, custom and temporary states, schedules, and status events.    |
+| [Profile](sources/profile/README.md)             | The one person this installation belongs to, and the machine that may speak for them.                   |
+| [Murmur](sources/murmur/README.md)               | Contacts over one Murmur identity, and the requests either side is waiting on.                          |
 
 ### Places and things
 
@@ -183,9 +183,9 @@ Modules owning tables through their own migrations: auto, collaboration, compact
 history, mcp, murmur, presence, profile, projects, scheduling, secrets, tasks, usage, user input,
 workflows, and workspaces. The rest own none: abort, compute, config, files, gemini, git, image
 generation, model switch, observation, permissions, search, skills, system prompt, and titles.
-Compute, system prompt and titles use Agent KV only, terminals stores nothing anywhere because a
-terminal ends with the process behind it, and collaboration's migrations exist only to retire the
-tables it used to keep.
+Compute uses per-agent and shared Agent KV, while system prompt and titles use Agent KV only;
+terminals stores nothing anywhere because a terminal ends with the process behind it, and
+collaboration's migrations exist only to retire the tables it used to keep.
 
 Murmur owns two tables rather than one: a single row saying which person its identity belongs to,
 and the key–value table Murmur itself writes its cryptographic state into. They share a database
