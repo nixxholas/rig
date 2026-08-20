@@ -9,6 +9,7 @@ import { type Static, Type } from "@sinclair/typebox";
 
 import {
     cuid2Schema,
+    eventCursorSchema,
     Nullable,
     timestampSchema,
     type Cuid2,
@@ -410,8 +411,13 @@ export interface MessageHistoryQuery {
 }
 
 /** `GET /v0/agents/:agentId/messages` */
-export interface MessageHistoryResponse {
+export const messageHistoryResponseSchema = Type.Object({
+    /** The event cursor captured before the history read. */
+    cursor: eventCursorSchema,
+    hasMore: Type.Boolean(),
     /** Oldest first, whole runs only. */
-    runs: HistoryRun[];
-    hasMore: boolean;
-}
+    runs: Type.Array(Type.Unsafe<HistoryRun>({ type: "object" })),
+});
+
+/** `GET /v0/agents/:agentId/messages` */
+export type MessageHistoryResponse = Static<typeof messageHistoryResponseSchema>;

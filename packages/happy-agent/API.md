@@ -31,7 +31,7 @@ at `paths.tokenPath` with mode `0600`. A missing or mismatched token yields `401
 
 All routes are prefixed with `/v0`. Independently of the path version, every daemon advertises
 its identity through the health endpoint as a single `version` object: a numeric `protocol`
-(integer, currently 21) and the `daemon` product version string. Clients compare `protocol`
+(integer, currently 22) and the `daemon` product version string. Clients compare `protocol`
 against the number they were built for and refuse to talk to an incompatible daemon; `daemon` is
 for display and diagnostics only.
 
@@ -171,7 +171,7 @@ Response — `200`:
     "healthy": true,
     "ready": true,
     "status": "ready",
-    "version": { "protocol": 21, "daemon": "1.2.3" }
+    "version": { "protocol": 22, "daemon": "1.2.3" }
 }
 ```
 
@@ -1768,13 +1768,17 @@ Response — `200`:
             ]
         }
     ],
-    "hasMore": true
+    "hasMore": true,
+    "cursor": "01991f3a-6d2f-7000-8000-3a0b2c4d5e6f"
 }
 ```
 
 Runs are returned oldest first, and messages oldest first within each run. A history run is the
 run metadata above plus `messages`, oldest first. Its `id` is the `runId` assigned at message
-acceptance.
+acceptance. `cursor` is the event cursor captured **before** the history read. A client follows the
+global event stream from this cursor after installing the page. A mutation concurrent with the
+read may therefore appear in both the page and the replay, but it cannot fall between them; stable
+message identities and delta offsets make the duplicate harmless.
 
 Pending queue and steering messages are deliberately absent here: they are current composer state,
 not pageable accepted history. The agent bootstrap endpoint returns their complete oldest-first
@@ -2371,13 +2375,27 @@ how a bootstrap snapshot and an event stream reconcile.
     - `runId` (ID string).
     - `message` (full message object) — the whole message as of now; not a diff.
 - `message.delta` — streaming text, the one event that is **not** a full object. Deltas are
-  the high-frequency path; a client that misses some (or does not handle them) recovers the
-  full message from the next `message.updated` or from history.
+  the high-frequency path. Every delta identifies the absolute prior length of its target block,
+  so replay is idempotent and a missed append is detectable. A client that detects a gap or
+  conflict recovers the full message from the next `message.updated` or authoritative history.
     - `agentId` (ID string).
     - `runId` (ID string).
     - `messageId` (ID string) — the growing message.
     - `blockIndex` (number) — which content block grows.
+    - `offset` (non-negative integer) — the target block's text length immediately before this
+      append, measured in UTF-16 code units.
     - `append` (string) — text to concatenate onto that block.
+
+    Delta application is exact:
+
+    - when the current text length equals `offset`, append the complete `append`;
+    - when the complete `append` is already present starting at `offset`, ignore the replay;
+    - when the current text ends partway through an otherwise matching `append`, append only its
+      missing suffix;
+    - when the block is absent or not textual, the current text is shorter than `offset`, or text
+      after `offset` conflicts with `append`, stop applying deltas for that message and reconcile
+      it from authoritative history (or a later full `message.updated`).
+
 - `message.deleted` — the message is gone from history; clients remove it from rendering.
   There is no REST operation behind this: deletion happens only when the daemon **resets a
   block of the transcript to restart inference** — a retried or interrupted generation whose

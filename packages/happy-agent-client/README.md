@@ -14,6 +14,10 @@ same build runs unchanged in Node and in a browser. The daemon listens on a Unix
 socket; a caller reaching one supplies its own runtime's socket-capable `fetch`, and the
 client never dials a socket itself or reads credentials from disk.
 
+`applyMessageDelta` implements the protocol's offset-aware text reduction without adding client
+state: exact and overlapping replays converge idempotently, while a gap or conflicting overlap
+returns `reconcile` so the caller can replace the message from authoritative history.
+
 Protocol shapes live in `sources/protocol/`, one file per API chapter, with shared wire
 values declared as TypeBox schemas and their TypeScript types derived with `Static`.
 

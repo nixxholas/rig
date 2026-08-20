@@ -6,7 +6,15 @@
  * and the daemon says so rather than silently skipping what was lost.
  */
 
-import type { Cuid2, EventCursor, ResourceVersion, Timestamp } from "./common.js";
+import { type Static, Type } from "@sinclair/typebox";
+
+import {
+    cuid2Schema,
+    type Cuid2,
+    type EventCursor,
+    type ResourceVersion,
+    type Timestamp,
+} from "./common.js";
 import type { Agent, AgentDraftSnapshot } from "./agents.js";
 import type { GitState } from "./git.js";
 import type { Message, Run } from "./messages.js";
@@ -128,15 +136,20 @@ export interface MessageUpdatedPayload extends MutationEcho {
  * A client that misses deltas recovers the full message from the next
  * `message.updated` or from history.
  */
-export interface MessageDeltaPayload {
-    agentId: Cuid2;
-    runId: Cuid2;
-    messageId: Cuid2;
+export const messageDeltaPayloadSchema = Type.Object({
+    agentId: cuid2Schema,
+    runId: cuid2Schema,
+    messageId: cuid2Schema,
     /** Which content block grows. */
-    blockIndex: number;
+    blockIndex: Type.Integer({ minimum: 0 }),
+    /** The block's prior UTF-16 code-unit length. */
+    offset: Type.Integer({ minimum: 0 }),
     /** Text to concatenate onto that block. */
-    append: string;
-}
+    append: Type.String(),
+});
+
+/** Streaming text with an absolute prior-text offset. */
+export type MessageDeltaPayload = Static<typeof messageDeltaPayloadSchema>;
 
 /**
  * The message is gone from history.

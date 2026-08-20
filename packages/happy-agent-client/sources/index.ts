@@ -7,6 +7,8 @@ export { readSseFrames } from "./readSseFrames.js";
 export type { SseFrame } from "./readSseFrames.js";
 export { endpointUrl } from "./endpointUrl.js";
 export type { QueryParameters, QueryValue } from "./endpointUrl.js";
+export { applyMessageDelta } from "./applyMessageDelta.js";
+export type { MessageDeltaApplication } from "./applyMessageDelta.js";
 export * from "./requestOptions.js";
 
 export * from "./protocol/agents.js";
