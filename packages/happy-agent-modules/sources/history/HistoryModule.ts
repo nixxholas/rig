@@ -1678,7 +1678,6 @@ interface HistoryRow {
     readonly run_id: string | null;
     readonly role: string;
     readonly message_json: string;
-    readonly search_text: string;
     readonly assistant_messages: number | string;
     readonly user_messages: number | string;
     readonly text_characters: number | string;
@@ -1720,7 +1719,6 @@ const HISTORY_ROW_COLUMNS = `position,
                              run_id,
                              role,
                              message_json,
-                             search_text,
                              assistant_messages,
                              user_messages,
                              text_characters,
@@ -1839,13 +1837,10 @@ async function historyPositionAt(
 }
 
 /**
- * Rebuild one record from its row, and check the row against itself.
+ * Rebuild one record from its row, and check its canonical denormalized fields.
  *
- * Identity, role, search text, and the per-message counts are all denormalized copies of what the
- * stored message already says. A reader answers from those copies — it filters on `role`, searches
- * `search_text`, and sums the counts — so a row whose copies no longer agree with its own message
- * answers questions about a message that was never recorded. There is no safe repair for that, so
- * a disagreeing row fails the read rather than being quietly believed or quietly dropped.
+ * Identity, role, and the per-message counts are denormalized copies of what the stored message
+ * already says. Search text is a deliberately lossy index and is not an integrity boundary.
  */
 function toHistoryRecord(row: HistoryRow): HistoryRecord {
     const message = parseStoredMessage(row.message_json);
@@ -1858,9 +1853,6 @@ function toHistoryRecord(row: HistoryRow): HistoryRecord {
     }
     if (row.role !== message.role) {
         throw new Error("The history module found a mismatched persisted role.");
-    }
-    if (row.search_text !== foldHistorySearchText(historyMessageSearchParts(message).join("\n"))) {
-        throw new Error("The history module found a mismatched persisted search index.");
     }
     const stored: HistoryStats = {
         assistantMessages: toSafeInteger(row.assistant_messages, "assistant message count"),

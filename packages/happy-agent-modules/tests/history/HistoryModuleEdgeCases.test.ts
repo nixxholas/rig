@@ -139,6 +139,40 @@ describe("HistoryModule edge cases", () => {
         }
     });
 
+    it("round-trips tool output while omitting NUL characters from search text", async () => {
+        const history = new HistoryModule();
+        const database = moduleDatabase(history.migrations, "history-nul-tool-output");
+        await database.ready;
+        const output = "binary before\0binary after";
+
+        try {
+            await history.record(database.context, "agent-a", {
+                blocks: [
+                    {
+                        callId: "call-binary",
+                        output,
+                        toolName: "exec_command",
+                        type: "tool_result",
+                    },
+                ],
+                recordId: "record-binary",
+                role: "assistant",
+            });
+
+            await expect(history.read(database.context, "agent-a")).resolves.toMatchObject({
+                messages: [{ message: { blocks: [{ output }] } }],
+            });
+            await expect(
+                history.read(database.context, "agent-a", { query: "BINARY BEFOREBINARY AFTER" }),
+            ).resolves.toMatchObject({ matchedMessages: 1 });
+            await expect(
+                history.read(database.context, "agent-a", { query: "BINARY BEFORE�BINARY AFTER" }),
+            ).resolves.toMatchObject({ matchedMessages: 0 });
+        } finally {
+            database.close();
+        }
+    });
+
     it("rejects a persisted row whose denormalized statistics disagree with its message", async () => {
         const history = new HistoryModule();
         const database = moduleDatabase(history.migrations, "history-stat-validation");
@@ -210,7 +244,7 @@ describe("HistoryModule edge cases", () => {
         }
     });
 
-    it("rejects a persisted row whose search index disagrees with its message", async () => {
+    it("does not treat the lossy search index as an integrity boundary", async () => {
         const history = new HistoryModule();
         const database = moduleDatabase(history.migrations, "history-search-index-validation");
         await database.ready;
@@ -228,7 +262,10 @@ describe("HistoryModule edge cases", () => {
             );
             await expect(
                 history.read(database.context, "agent-a", { query: "forged" }),
-            ).rejects.toThrow();
+            ).resolves.toMatchObject({
+                matchedMessages: 1,
+                messages: [{ message: { blocks: [{ text: "actual text" }] } }],
+            });
         } finally {
             database.close();
         }

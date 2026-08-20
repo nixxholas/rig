@@ -17,13 +17,15 @@ export function messageMatchesHistoryFilters(
 }
 
 /**
- * The one case-folding rule shared by every history adapter.
+ * The one text-normalization and case-folding rule shared by every history adapter.
  *
  * SQLite's built-in case folding is ASCII-only. SQL adapters that cannot execute this Unicode
- * operation use a bounded host-side filter with this exact function instead.
+ * operation use a bounded host-side filter with this exact function instead. NUL characters may
+ * appear in binary tool output but cannot safely round-trip through SQLite TEXT, so they are
+ * omitted from the derived search copy. The canonical message retains the original output.
  */
 export function foldHistorySearchText(value: string): string {
-    return value.toLocaleLowerCase("en-US");
+    return value.replaceAll("\0", "").toLocaleLowerCase("en-US");
 }
 
 /** Every piece of a message that counts as text a search may match. */
