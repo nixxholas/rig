@@ -1,3 +1,6 @@
+import { writeFile } from "node:fs/promises";
+import { join } from "node:path";
+
 import {
     createAgentGym,
     type AgentGym,
@@ -731,6 +734,43 @@ describe("public message and history matrix", () => {
         const after = await gym.client.getMessages(gym.defaultSessionId);
         expect(after).toEqual(before);
         expect(after.runs[0]?.status).toBe("failed");
+    });
+
+    it("MH-27 gives an AGENTS.md replacement notice to the model but never to the API", async () => {
+        // The notice runs a turn of its own, so the script answers by request rather than by list.
+        const gym = await startGym({
+            files: { "AGENTS.md": "Always greet the user in Portuguese.\n" },
+            inference: (request): GymTurn => ({
+                content: [{ text: `answer ${String(request.callIndex)}`, type: "text" }],
+            }),
+        });
+        await gym.send("first");
+
+        // Editing AGENTS.md mid-session makes the daemon inject a replacement notice carrying the
+        // whole instruction body. It is context for the model, not conversation for the person.
+        await writeFile(
+            join(gym.workspacePath, "AGENTS.md"),
+            "Always greet the user in Japanese.\n",
+            "utf8",
+        );
+        await gym.send("second");
+
+        const seenByModel = JSON.stringify(gym.inference.requests.at(-1)?.messages ?? []);
+        expect(seenByModel).toContain("replace all previously provided AGENTS.md instructions");
+        expect(seenByModel).toContain("Always greet the user in Japanese.");
+
+        const history = await gym.client.getMessages(gym.defaultSessionId);
+        const transcript = JSON.stringify(history);
+        expect(transcript).toContain("second");
+        expect(
+            history.runs.flatMap((run) => run.messages.map((message) => message.role)),
+        ).not.toContain("system");
+        expect(transcript).not.toContain("replace all previously provided AGENTS.md instructions");
+        expect(transcript).not.toContain("Always greet the user in Japanese.");
+
+        const streamed = JSON.stringify(await gym.events());
+        expect(streamed).not.toContain("replace all previously provided AGENTS.md instructions");
+        expect(streamed).not.toContain("Always greet the user in Japanese.");
     });
 });
 

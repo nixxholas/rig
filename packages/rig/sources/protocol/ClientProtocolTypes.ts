@@ -193,7 +193,6 @@ export interface SystemMessage {
     blocks: readonly ContentBlock[];
     context?: "excluded";
     id: string;
-    internal?: true;
     role: "system";
     structured?: ServiceNotice;
 }
@@ -205,7 +204,6 @@ export interface UserMessage {
         sessionId: string;
         title?: string;
     };
-    agentsMd?: { fingerprint: string | null };
     blocks: readonly ContentBlock[];
     contextOnly?: true;
     encryptedAgentMessage?: {

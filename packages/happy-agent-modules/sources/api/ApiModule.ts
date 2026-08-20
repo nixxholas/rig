@@ -88,6 +88,7 @@ import {
 import { ApiError, invalidRequest, notFound, type ApiErrorCode } from "./ApiError.js";
 import { ApiEventJournal, type ApiEvent } from "./ApiEventJournal.js";
 import {
+    messageHiddenFromUser,
     messageResource,
     providerMessageContent,
     reviewedToolCalls,
@@ -140,6 +141,8 @@ interface AcceptedMessageBatch {
     readonly kind: "send" | "steering";
     readonly runId: string;
     readonly messages: {
+        /** An internal message still starts its run, but never enters `acceptedMessageIds`. */
+        readonly hidden: boolean;
         readonly id: string;
         readonly occurredAt: number;
         readonly previousVersion: string;
@@ -662,6 +665,7 @@ export class ApiModule implements AgentModule {
             this.#history.onAppend((_ctx, agentId, messages) => {
                 for (const message of messages) {
                     if (
+                        messageHiddenFromUser(message) ||
                         message.blocks.some((block) => block.type === "compaction") ||
                         message.role === "user" ||
                         message.senderAgentId !== undefined ||
@@ -1394,7 +1398,9 @@ export class ApiModule implements AgentModule {
         const role = projected["role"];
         const current = this.#activeRuns.get(agentId);
         const fromUser = role === "user";
+        const hidden = messageHiddenFromUser(message);
         if (!fromUser) {
+            if (hidden) return;
             this.#journal.append(
                 "message.created",
                 {
@@ -1406,7 +1412,7 @@ export class ApiModule implements AgentModule {
             );
             return;
         }
-        if (!this.#apiPendingMessageIds.has(id)) {
+        if (!hidden && !this.#apiPendingMessageIds.has(id)) {
             this.#journal.append(
                 "message.created",
                 {
@@ -1436,6 +1442,7 @@ export class ApiModule implements AgentModule {
             messages: [],
         };
         batch.messages.push({
+            hidden,
             id,
             occurredAt: event.occurredAt,
             previousVersion,
@@ -1485,7 +1492,9 @@ export class ApiModule implements AgentModule {
             usage: {},
             costUsd: null,
         };
-        const acceptedMessageIds = batch.messages.map((message) => message.id);
+        const acceptedMessageIds = batch.messages.flatMap((message) =>
+            message.hidden ? [] : [message.id],
+        );
         if (batch.kind === "steering" && current !== undefined) {
             const finishedRun = {
                 ...current,
@@ -2126,9 +2135,9 @@ export class ApiModule implements AgentModule {
                         endedAt: run.endedAt,
                         usage: runUsage.usage,
                         costUsd: runUsage.costUsd,
-                        messages: run.messages.map((message) =>
-                            messageResource(message, { omitToolData }),
-                        ),
+                        messages: run.messages
+                            .filter((message) => !messageHiddenFromUser(message))
+                            .map((message) => messageResource(message, { omitToolData })),
                     };
                 }),
             ),

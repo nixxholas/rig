@@ -52,6 +52,16 @@ const providerToolResultBlockSchema = Type.Object(
 );
 const providerContentSchema = Type.Array(Type.Unknown());
 
+/**
+ * Whether a durable message was injected for the model alone and must stay out of the public API.
+ *
+ * The message remains in durable history — history reads, Auto review evidence, and the model's
+ * own context still see it — but no API consumer is shown content the daemon marked internal.
+ */
+export function messageHiddenFromUser(message: HistoryMessage): boolean {
+    return message.hideFromUser === true;
+}
+
 /** Project one durable history message into the public message shape. */
 export function messageResource(
     message: HistoryMessage,

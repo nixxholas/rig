@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { eventIdSchema } from "../../sources/events/index.js";
 import { apiResourceVersion } from "../../sources/api/ApiResourceProjection.js";
 import {
+    messageHiddenFromUser,
     messageResource,
     providerMessageContent,
     reviewedToolCalls,
@@ -26,10 +27,10 @@ describe("apiResourceVersion", () => {
     });
 });
 
-describe("messageResource", () => {
-    it("projects a durable system notice with its role intact", () => {
+describe("messageHiddenFromUser", () => {
+    it("hides a durable AGENTS.md notice the daemon injected for the model alone", () => {
         expect(
-            messageResource({
+            messageHiddenFromUser({
                 at: 100,
                 blocks: [
                     {
@@ -41,16 +42,35 @@ describe("messageResource", () => {
                 recordId: "agents-md-notice",
                 role: "system",
             }),
+        ).toBe(true);
+    });
+
+    it("shows a system notice the daemon did not mark internal", () => {
+        expect(
+            messageHiddenFromUser({
+                at: 100,
+                blocks: [{ type: "text", text: "The workspace moved." }],
+                recordId: "system-notice",
+                role: "system",
+            }),
+        ).toBe(false);
+    });
+});
+
+describe("messageResource", () => {
+    it("projects a durable system notice with its role intact", () => {
+        expect(
+            messageResource({
+                at: 100,
+                blocks: [{ type: "text", text: "The workspace moved." }],
+                recordId: "system-notice",
+                role: "system",
+            }),
         ).toEqual({
-            id: "agents-md-notice",
+            id: "system-notice",
             role: "system",
             createdAt: 100,
-            content: [
-                {
-                    type: "text",
-                    text: "These AGENTS.md instructions replace earlier instructions.",
-                },
-            ],
+            content: [{ type: "text", text: "The workspace moved." }],
             metadata: {},
         });
     });
