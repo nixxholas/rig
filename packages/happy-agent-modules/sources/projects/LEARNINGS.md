@@ -31,14 +31,16 @@ The home directory is the single `home` project, but nothing stopped a second fo
 registered as `home`. Registration now refuses it, in `create` and in `ensure` alike. Ensuring the
 folder that already is the home project still converges on that row.
 
-## No Git is a project kind, not a registration error
+## Git is project state, not a registration gate
 
 A project is a folder, so requiring every explicitly registered folder to be a Git repository
 rejected the plain-directory workflow the workspace model already supports. Registration now
 accepts any readable directory, including a subdirectory inside a larger Git working tree. Setup
 durably records whether that exact folder supports worktrees and, when it does not, the workspaces
 module creates copied child folders. The folder the person selected remains the project boundary;
-an ancestor repository must not silently widen it.
+an ancestor repository must not silently widen it. Registration never inspects `.git` or runs Git;
+missing, malformed, inaccessible, or otherwise unusable repository metadata only means setup
+records that the project cannot use Git worktrees. It never prevents the folder becoming a project.
 
 ## Looking at a folder is not always needed
 

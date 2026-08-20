@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -114,12 +114,33 @@ describe("plain-directory project registration", () => {
         }
     });
 
+    it("does not inspect Git when the selected folder has invalid Git metadata", async () => {
+        const root = await mkdtemp(join(tmpdir(), "plain-project-validation-"));
+        const folder = join(root, "plain");
+        await mkdir(folder);
+        await writeFile(join(folder, ".git"), "invalid Git metadata\n", "utf8");
+        const topLevel = vi.fn(() =>
+            Promise.reject(Object.assign(new Error("Operation not permitted."), { code: 1 })),
+        );
+        const git = {
+            normalizeProjectCwd: () => folder,
+            topLevel,
+        };
+        try {
+            await expect(validateRegistrationPath(git, folder)).resolves.toBe(folder);
+            expect(topLevel).not.toHaveBeenCalled();
+        } finally {
+            await rm(root, { force: true, recursive: true });
+        }
+    });
+
     it("keeps missing, inaccessible, and non-directory paths as registration errors", async () => {
         const root = await mkdtemp(join(tmpdir(), "invalid-directory-registration-"));
         const file = join(root, "file.txt");
         const inaccessible = join(root, "inaccessible");
         await writeFile(file, "not a directory\n", "utf8");
         await mkdir(inaccessible);
+        await chmod(inaccessible, 0o000);
         const world = await createWorld(root, "invalid-directory");
         try {
             await expect(
@@ -130,19 +151,12 @@ describe("plain-directory project registration", () => {
             await expect(
                 world.projects.register(world.database.context, { path: file }),
             ).rejects.toMatchObject({ code: "not_directory" });
-
-            const inaccessibleGit = {
-                normalizeProjectCwd: () => inaccessible,
-                topLevel: () =>
-                    Promise.reject(
-                        Object.assign(new Error("Permission denied."), { code: "EACCES" }),
-                    ),
-            };
             await expect(
-                validateRegistrationPath(inaccessibleGit, inaccessible),
+                world.projects.register(world.database.context, { path: inaccessible }),
             ).rejects.toMatchObject({ code: "path_inaccessible" });
         } finally {
             await world.close();
+            await chmod(inaccessible, 0o755);
             await rm(root, { force: true, recursive: true });
         }
     });

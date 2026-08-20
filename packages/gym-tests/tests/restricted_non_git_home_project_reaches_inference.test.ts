@@ -10,6 +10,36 @@ afterEach(async () => {
 });
 
 describe("restricted non-git home project", () => {
+    it("starts the TUI from the non-Git home directory", async () => {
+        const gym = await createGym({
+            mode: "docker",
+            entrypoint: [
+                "/bin/sh",
+                "-lc",
+                "cd /home/rig && exec node /app/packages/rig/dist/main.js",
+            ],
+            homeFiles: {
+                "README.md": "A home directory without a Git marker.\n",
+            },
+            inference: [
+                {
+                    content: [{ text: "The home project reached inference.", type: "text" }],
+                },
+            ],
+            permissionMode: "workspace_write",
+        });
+        running.add(gym);
+
+        gym.terminal.type("Confirm the home project is available.");
+        gym.terminal.press("enter");
+
+        const screen = await gym.terminal.waitForText(
+            "The home project reached inference.",
+            30_000,
+        );
+        expect(screen.text).toContain("The home project reached inference.");
+    }, 120_000);
+
     it("reaches inference when ancestor marker paths are private", async () => {
         const gym = await createGym({
             mode: "docker",
@@ -44,5 +74,36 @@ describe("restricted non-git home project", () => {
             content: [{ text: "Confirm this project is available.", type: "text" }],
             role: "user",
         });
-    });
+    }, 120_000);
+
+    it("starts from a readable folder whose Git marker is inaccessible", async () => {
+        const gym = await createGym({
+            mode: "docker",
+            entrypoint: [
+                "/bin/sh",
+                "-lc",
+                "cd /home/rig/project && exec node /app/packages/rig/dist/main.js",
+            ],
+            homeFiles: {
+                "project/.git": { content: "not usable Git metadata\n", mode: 0o000 },
+                "project/README.md": "A project with inaccessible Git metadata.\n",
+            },
+            inference: [
+                {
+                    content: [{ text: "The invalid Git project reached inference.", type: "text" }],
+                },
+            ],
+            permissionMode: "workspace_write",
+        });
+        running.add(gym);
+
+        gym.terminal.type("Confirm this folder is still a project.");
+        gym.terminal.press("enter");
+
+        const screen = await gym.terminal.waitForText(
+            "The invalid Git project reached inference.",
+            30_000,
+        );
+        expect(screen.text).toContain("The invalid Git project reached inference.");
+    }, 120_000);
 });
