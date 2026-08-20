@@ -171,6 +171,7 @@ its public methods, and its storage and event contracts.
 
 | Module                                     | What it adds                                                                                    |
 | ------------------------------------------ | ----------------------------------------------------------------------------------------------- |
+| [Files](sources/files/README.md)           | Fast physical file trees, FFF-backed autocomplete, guarded writes, and live change events.      |
 | [Projects](sources/projects/README.md)     | Repositories registered on demand, with bounded settings and durable rename and archival.       |
 | [Workspaces](sources/workspaces/README.md) | Isolated worktrees cut from a project, created, inspected, and archived.                        |
 | [Secrets](sources/secrets/README.md)       | Safe secret metadata and attachments; a value is resolved without ever showing it to the model. |
@@ -180,11 +181,11 @@ its public methods, and its storage and event contracts.
 
 Modules owning tables through their own migrations: auto, collaboration, compactions, events, goal,
 history, mcp, murmur, presence, profile, projects, scheduling, secrets, tasks, usage, user input,
-workflows, and workspaces. The rest own none: abort, compute, config, gemini, git, image generation,
-model switch, observation, permissions, search, skills, system prompt, and titles. Compute, system
-prompt and titles use Agent KV only, terminals stores nothing anywhere because a terminal ends with
-the process behind it, and collaboration's migrations exist only to retire the tables it used to
-keep.
+workflows, and workspaces. The rest own none: abort, compute, config, files, gemini, git, image
+generation, model switch, observation, permissions, search, skills, system prompt, and titles.
+Compute, system prompt and titles use Agent KV only, terminals stores nothing anywhere because a
+terminal ends with the process behind it, and collaboration's migrations exist only to retire the
+tables it used to keep.
 
 Murmur owns two tables rather than one: a single row saying which person its identity belongs to,
 and the key–value table Murmur itself writes its cryptographic state into. They share a database

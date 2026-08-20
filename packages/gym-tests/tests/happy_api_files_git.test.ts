@@ -3,7 +3,7 @@ import { mkdir, symlink, writeFile as writeFs } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 
-import { createAgentGym, type AgentGym } from "@slopus/happy-agent-gym";
+import { clientFrameEvent, createAgentGym, type AgentGym } from "@slopus/happy-agent-gym";
 import { afterEach, describe, expect, it } from "vitest";
 
 const execFile = promisify(execFileCallback);
@@ -20,6 +20,7 @@ describe("the public files and Git API", () => {
         const gym = await createAgentGym({
             files: {
                 "README.md": "A workspace readme.\n",
+                "node_modules/dependency/index.js": "module.exports = {};\n",
                 "src/alpha.ts": "export const alpha = 1;\n",
                 "src/beta.ts": "export const beta = 2;\n",
                 "src/deep/gamma.test.ts": "export const gamma = true;\n",
@@ -55,6 +56,12 @@ describe("the public files and Git API", () => {
         expect(emptySearch.files.map((file) => file.path)).toEqual(
             expect.arrayContaining(["README.md", "src/alpha.ts"]),
         );
+        expect(emptySearch.files.map((file) => file.path)).not.toContain(
+            "node_modules/dependency/index.js",
+        );
+
+        const rootTree = await gym.client.getFileTree(workspaceId, { limit: 500 });
+        expect(rootTree.entries.map((entry) => entry.name)).toContain("node_modules");
 
         const firstPage = await gym.client.getFileTree(workspaceId, {
             limit: 1,
@@ -136,6 +143,50 @@ describe("the public files and Git API", () => {
             code: "too_large",
             status: 413,
         });
+    });
+
+    it("publishes file invalidations for rendered files and API writes", async () => {
+        const gym = await createAgentGym({
+            files: { "src/open.txt": "before\n" },
+        });
+        running.add(gym);
+        const workspaceId = await rootWorkspaceId(gym);
+        const stream = gym.stream();
+        await stream.opened();
+
+        await gym.client.readFile(workspaceId, "src/open.txt");
+        await writeFs(join(gym.workspacePath, "src/open.txt"), "outside\n", "utf8");
+        const external = await stream.waitFor((frame) => {
+            const event = clientFrameEvent(frame);
+            return (
+                event?.type === "files.updated" &&
+                event.payload.workspaceId === workspaceId &&
+                event.payload.paths?.includes("src/open.txt") === true
+            );
+        }, "the external file invalidation");
+        expect(clientFrameEvent(external)).toMatchObject({
+            type: "files.updated",
+            payload: { workspaceId, paths: expect.arrayContaining(["src/open.txt"]) },
+        });
+
+        await gym.client.writeFile(workspaceId, {
+            content: Buffer.from("created\n", "utf8").toString("base64"),
+            expectedHash: null,
+            path: "created.txt",
+        });
+        const written = await stream.waitFor((frame) => {
+            const event = clientFrameEvent(frame);
+            return (
+                event?.type === "files.updated" &&
+                event.payload.workspaceId === workspaceId &&
+                event.payload.paths?.includes("created.txt") === true
+            );
+        }, "the API file invalidation");
+        expect(clientFrameEvent(written)).toMatchObject({
+            type: "files.updated",
+            payload: { workspaceId, paths: expect.arrayContaining(["created.txt"]) },
+        });
+        stream.close();
     });
 
     it("keeps fuzzy indexes scoped to the selected child workspace", async () => {

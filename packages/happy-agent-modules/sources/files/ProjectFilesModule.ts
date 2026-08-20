@@ -12,21 +12,32 @@ import {
 } from "node:fs/promises";
 import { basename, dirname, join, resolve, sep } from "node:path";
 
+import type { AgentModule } from "@slopus/happy-agent-base";
 import { Type, type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
-import type { Context } from "@steve.kite/stdlib";
+import { createRootContext, detach, type Context, type RootContext } from "@steve.kite/stdlib";
 import type { GitModule } from "../git/index.js";
 import type { ProjectsModule } from "../projects/index.js";
 import type { WorkspacesModule } from "../workspaces/index.js";
+import { ProjectFileWatcher } from "./ProjectFileWatcher.js";
+import { WorkspaceFileIndex } from "./WorkspaceFileIndex.js";
 
 const MAX_FILE_BYTES = 44 * 1024 * 1024;
+const MAX_CHANGED_PATHS = 256;
+const MAX_SEARCH_RESULTS = 50;
 const MAX_TREE_ENTRIES = 500;
-const MAX_WALK_ENTRIES = 20_000;
 
 export const relativeFilePathSchema = Type.String({
     maxLength: 16_384,
     pattern: "^(?!/)(?!.*\\\\)(?!.*\\u0000)(?:[^/]+(?:/[^/]+)*)?$",
 });
+export const fileSearchQuerySchema = Type.Object(
+    {
+        limit: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_SEARCH_RESULTS })),
+        query: Type.String({ maxLength: 512 }),
+    },
+    { additionalProperties: false },
+);
 export const fileTreeQuerySchema = Type.Object(
     {
         cursor: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })),
@@ -65,12 +76,35 @@ export const projectFileCurrentHashSchema = Type.Union([
     Type.Null(),
     Type.String({ minLength: 64, maxLength: 64, pattern: "^[0-9a-f]{64}$" }),
 ]);
+export const projectFilesEventSchema = Type.Object(
+    {
+        at: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
+        eventId: Type.String({ minLength: 1, maxLength: 128 }),
+        paths: Type.Union([
+            Type.Null(),
+            Type.Array(relativeFilePathSchema, {
+                maxItems: MAX_CHANGED_PATHS,
+                uniqueItems: true,
+            }),
+        ]),
+        type: Type.Literal("files_changed"),
+        workspaceId: Type.String({ minLength: 1, maxLength: 128 }),
+    },
+    { additionalProperties: false },
+);
 
 export type FileTreeQuery = Static<typeof fileTreeQuerySchema>;
+export type FileSearchQuery = Static<typeof fileSearchQuerySchema>;
 export type FileReadQuery = Static<typeof fileReadQuerySchema>;
 export type FileRevisionQuery = Static<typeof fileRevisionQuerySchema>;
 export type FileWriteInput = Static<typeof fileWriteSchema>;
 export type ProjectFileCurrentHash = Static<typeof projectFileCurrentHashSchema>;
+export type ProjectFilesEvent = Static<typeof projectFilesEventSchema>;
+export type ProjectFilesEventListener = (
+    ctx: Context,
+    event: ProjectFilesEvent,
+) => Promise<void> | void;
+export type ProjectFilesUnsubscribe = () => void;
 
 export interface ProjectFileRoot {
     readonly projectId: string;
@@ -90,6 +124,10 @@ export interface FileTreeResult {
     readonly path: string;
 }
 
+export interface FileSearchResult {
+    readonly files: readonly { readonly fileName: string; readonly path: string }[];
+}
+
 export interface FileReadResult {
     readonly content: string;
     readonly hash: string;
@@ -97,6 +135,10 @@ export interface FileReadResult {
 
 export interface FileWriteResult {
     readonly hash: string;
+}
+
+interface ComparedWriteResult extends FileWriteResult {
+    readonly created: boolean;
 }
 
 export class ProjectFileError extends Error {
@@ -122,17 +164,48 @@ export class ProjectFileError extends Error {
     }
 }
 
-export class ProjectFilesModule {
+export class ProjectFilesModule implements AgentModule {
+    readonly name = "files";
+
     readonly #git: GitModule;
+    readonly #listeners = new Set<ProjectFilesEventListener>();
     readonly #protectedPaths = [".git", "AGENTS.md", "AGENTS_SECURITY.md"] as const;
     readonly #projects: ProjectsModule;
+    readonly #index = new WorkspaceFileIndex();
     readonly #workspaces: WorkspacesModule;
     readonly #writeLocks = new Map<string, Promise<void>>();
+    #closed = false;
+    #lifetime: RootContext | undefined;
+    #watcher: ProjectFileWatcher | undefined;
 
     constructor(projects: ProjectsModule, workspaces: WorkspacesModule, git: GitModule) {
         this.#git = git;
         this.#projects = projects;
         this.#workspaces = workspaces;
+    }
+
+    /** Adopts the collection lifetime for filesystem watches that outlive one API request. */
+    readonly beforeStart = (ctx: Context): void => {
+        this.#lifetime ??= detach(ctx);
+    };
+
+    onEvent(listener: ProjectFilesEventListener): ProjectFilesUnsubscribe {
+        if (typeof listener !== "function") {
+            throw new Error("A project files subscriber must be a function.");
+        }
+        this.#listeners.add(listener);
+        return () => {
+            this.#listeners.delete(listener);
+        };
+    }
+
+    async close(): Promise<void> {
+        if (this.#closed) return;
+        this.#closed = true;
+        this.#listeners.clear();
+        this.#index.close();
+        await this.#watcher?.close();
+        this.#watcher = undefined;
     }
 
     async resolveRoot(
@@ -178,20 +251,23 @@ export class ProjectFilesModule {
         }
     }
 
-    async listPaths(
-        root: ProjectFileRoot,
-    ): Promise<{ readonly paths: readonly string[]; readonly truncated: boolean }> {
-        const paths: string[] = [];
-        let truncated = false;
-        await this.#walk(root.root, "", async (path, information) => {
-            if (paths.length >= 20_000) {
-                truncated = true;
-                return false;
-            }
-            if (information.isFile()) paths.push(path);
-            return true;
-        });
-        return { paths, truncated };
+    async search(root: ProjectFileRoot, query: FileSearchQuery): Promise<FileSearchResult> {
+        assertSchema(fileSearchQuerySchema, query, "file search query");
+        try {
+            return {
+                files: await this.#index.search(
+                    root.root,
+                    query.query,
+                    query.limit ?? MAX_SEARCH_RESULTS,
+                ),
+            };
+        } catch {
+            throw new ProjectFileError(
+                503,
+                "unavailable",
+                "Workspace files could not be indexed. Try again shortly.",
+            );
+        }
     }
 
     async tree(root: ProjectFileRoot, query: FileTreeQuery): Promise<FileTreeResult> {
@@ -202,31 +278,33 @@ export class ProjectFilesModule {
         if (!information.isDirectory()) {
             throw new ProjectFileError(400, "invalid", "The file-tree path must be a directory.");
         }
+        this.#watcherInstance().watchDirectory(root, path, directory);
         const entries = await readdir(directory, { withFileTypes: true });
         const offset = parseCursor(query.cursor);
         const limit = query.limit ?? 100;
         const selected = entries
             .sort((left, right) => left.name.localeCompare(right.name))
             .slice(offset, offset + limit);
-        const result = [];
-        for (const entry of selected) {
-            const relativePath = path === "" ? entry.name : `${path}/${entry.name}`;
-            const entryPath = join(directory, entry.name);
-            const entryInformation = await lstat(entryPath);
-            result.push({
-                modified: Math.trunc(entryInformation.mtimeMs),
-                name: entry.name,
-                path: relativePath,
-                size: entryInformation.isFile() ? entryInformation.size : 0,
-                type: entry.isDirectory()
-                    ? ("directory" as const)
-                    : entry.isFile()
-                      ? ("file" as const)
-                      : entry.isSymbolicLink()
-                        ? ("symlink" as const)
-                        : ("other" as const),
-            });
-        }
+        const result = await Promise.all(
+            selected.map(async (entry) => {
+                const relativePath = path === "" ? entry.name : `${path}/${entry.name}`;
+                const entryPath = join(directory, entry.name);
+                const entryInformation = await lstat(entryPath);
+                return {
+                    modified: Math.trunc(entryInformation.mtimeMs),
+                    name: entry.name,
+                    path: relativePath,
+                    size: entryInformation.isFile() ? entryInformation.size : 0,
+                    type: entry.isDirectory()
+                        ? ("directory" as const)
+                        : entry.isFile()
+                          ? ("file" as const)
+                          : entry.isSymbolicLink()
+                            ? ("symlink" as const)
+                            : ("other" as const),
+                };
+            }),
+        );
         return {
             entries: result,
             nextCursor:
@@ -242,8 +320,15 @@ export class ProjectFilesModule {
         }
         const path = await this.#resolveExisting(root.root, query.path, false);
         await this.#assertSafe(path, root.root, query.path);
+        const relativeDirectory = dirname(query.path);
+        this.#watcherInstance().watchDirectory(
+            root,
+            relativeDirectory === "." ? "" : relativeDirectory,
+            dirname(path),
+        );
         const bytes = await readFile(path);
         this.#assertSize(bytes.byteLength);
+        this.#index.ensure(root.root, query.path);
         return {
             content: bytes.toString("base64"),
             hash: sha256(bytes),
@@ -296,14 +381,16 @@ export class ProjectFilesModule {
             projectId: root.projectId,
             ...(root.workspaceId === undefined ? {} : { workspaceId: root.workspaceId }),
         });
-        return result;
+        if (result.created) this.#index.refresh(root.root);
+        this.#watcherInstance().changed(root, input.path);
+        return { hash: result.hash };
     }
 
     async #writeCompared(
         target: string,
         input: FileWriteInput,
         bytes: Buffer,
-    ): Promise<FileWriteResult> {
+    ): Promise<ComparedWriteResult> {
         let current: Buffer | undefined;
         try {
             current = await readFile(target);
@@ -337,7 +424,7 @@ export class ProjectFilesModule {
         } finally {
             await unlink(temporary).catch(() => undefined);
         }
-        return { hash: sha256(bytes) };
+        return { created: current === undefined, hash: sha256(bytes) };
     }
 
     /**
@@ -480,31 +567,6 @@ export class ProjectFilesModule {
         }
     }
 
-    async #walk(
-        root: string,
-        prefix: string,
-        visit: (path: string, information: import("node:fs").Dirent) => Promise<boolean>,
-        count = { value: 0 },
-    ): Promise<void> {
-        if (count.value >= MAX_WALK_ENTRIES) return;
-        const directory = prefix === "" ? root : join(root, prefix);
-        let entries;
-        try {
-            entries = await readdir(directory, { withFileTypes: true });
-        } catch {
-            return;
-        }
-        entries.sort((left, right) => left.name.localeCompare(right.name));
-        for (const entry of entries) {
-            if (entry.name === ".git") continue;
-            const path = prefix === "" ? entry.name : `${prefix}/${entry.name}`;
-            count.value++;
-            if (!(await visit(path, entry))) return;
-            if (entry.isDirectory()) await this.#walk(root, path, visit, count);
-            if (count.value >= MAX_WALK_ENTRIES) return;
-        }
-    }
-
     #assertSize(bytes: number): void {
         if (bytes > MAX_FILE_BYTES) {
             throw new ProjectFileError(
@@ -512,6 +574,52 @@ export class ProjectFilesModule {
                 "too_large",
                 "The project file exceeds the size limit.",
             );
+        }
+    }
+
+    #watcherInstance(): ProjectFileWatcher {
+        this.#watcher ??= new ProjectFileWatcher(
+            this.#root().named("project-file-watcher"),
+            async (ctx, root, paths, structural) => {
+                if (structural) this.#index.refresh(root.root);
+                await this.#publish(ctx, root.workspaceId ?? root.projectId, paths);
+            },
+        );
+        return this.#watcher;
+    }
+
+    #root(): RootContext {
+        this.#lifetime ??= createRootContext();
+        return this.#lifetime;
+    }
+
+    async #publish(
+        ctx: Context,
+        workspaceId: string,
+        paths: readonly string[] | null,
+    ): Promise<void> {
+        const event = {
+            at: Date.now(),
+            eventId: randomUUID(),
+            paths: paths === null ? null : [...paths],
+            type: "files_changed" as const,
+            workspaceId,
+        };
+        if (!Value.Check(projectFilesEventSchema, event)) {
+            throw new Error("The project files module created an invalid event.");
+        }
+        if (event.paths !== null) Object.freeze(event.paths);
+        Object.freeze(event);
+        for (const listener of [...this.#listeners]) {
+            try {
+                await listener(ctx, event);
+            } catch (error: unknown) {
+                ctx.log.warn(
+                    "A project files subscriber failed after the filesystem changed.",
+                    { eventId: event.eventId, workspaceId: event.workspaceId },
+                    error,
+                );
+            }
         }
     }
 }

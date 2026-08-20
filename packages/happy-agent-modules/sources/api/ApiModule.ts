@@ -33,6 +33,7 @@ import { EventsModule, eventIdSchema, type AgentEvent } from "../events/index.js
 import {
     fileReadQuerySchema,
     fileRevisionQuerySchema,
+    fileSearchQuerySchema,
     fileTreeQuerySchema,
     fileWriteSchema,
     ProjectFileError,
@@ -73,7 +74,6 @@ import {
     type UsageInferenceRecord,
 } from "../usage/index.js";
 import { UserInputModule, type UserInputEvent } from "../userInput/index.js";
-import { fileSearchQuerySchema, WorkspaceFileSearchModule } from "../workspaceFileSearch/index.js";
 import {
     WorkspaceInputError,
     WorkspacesModule,
@@ -159,7 +159,6 @@ export class ApiModule implements AgentModule {
     readonly #workspaces: WorkspacesModule;
     readonly #terminals: TerminalsModule;
     readonly #files: ProjectFilesModule;
-    readonly #fileSearch: WorkspaceFileSearchModule;
     readonly #git: GitModule;
     readonly #history: HistoryModule;
     readonly #permissions: PermissionsModule;
@@ -223,7 +222,6 @@ export class ApiModule implements AgentModule {
         workspaces: WorkspacesModule,
         terminals: TerminalsModule,
         files: ProjectFilesModule,
-        fileSearch: WorkspaceFileSearchModule,
         git: GitModule,
         history: HistoryModule,
         permissions: PermissionsModule,
@@ -240,7 +238,6 @@ export class ApiModule implements AgentModule {
         this.#workspaces = workspaces;
         this.#terminals = terminals;
         this.#files = files;
-        this.#fileSearch = fileSearch;
         this.#git = git;
         this.#history = history;
         this.#permissions = permissions;
@@ -645,6 +642,13 @@ export class ApiModule implements AgentModule {
                     workspaceId: entity.workspaceId ?? entity.projectId,
                     git: gitResource(snapshot),
                 });
+            }),
+            this.#files.onEvent((_eventCtx, event) => {
+                this.#journal.append(
+                    "files.updated",
+                    { workspaceId: event.workspaceId, paths: event.paths },
+                    event.at,
+                );
             }),
             this.#history.onAppend((_ctx, agentId, messages) => {
                 for (const message of messages) {
@@ -2911,7 +2915,7 @@ export class ApiModule implements AgentModule {
                     fileSearchQuerySchema,
                     "file search",
                 );
-                sendJson(response, 200, await this.#fileSearch.search(root.root, query));
+                sendJson(response, 200, await this.#files.search(root, query));
                 return true;
             }
             if (kind === "file-tree" && request.method === "GET") {

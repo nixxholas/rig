@@ -50,7 +50,6 @@ import { TerminalsModule } from "../terminals/index.js";
 import { TitlesModule } from "../titles/index.js";
 import { UsageModule } from "../usage/index.js";
 import { UserInputModule } from "../userInput/index.js";
-import { WorkspaceFileSearchModule } from "../workspaceFileSearch/index.js";
 import { WorkflowsModule } from "../workflows/index.js";
 import { WorkspacesModule } from "../workspaces/index.js";
 import { checkModuleToolParameters } from "./checkModuleToolParameters.js";
@@ -101,7 +100,6 @@ export interface HappyAgentRuntimeModules {
     readonly config: ConfigModule;
     readonly contextWindow: ContextWindowModule;
     readonly events: EventsModule;
-    readonly fileSearch: WorkspaceFileSearchModule;
     readonly files: ProjectFilesModule;
     readonly goal: GoalModule;
     readonly happy: HappyModule;
@@ -278,8 +276,7 @@ export async function startHappyAgentRuntime(
         const terminals = new TerminalsModule(projects, workspaces);
         unwind.unshift(async () => await terminals.close());
         const files = new ProjectFilesModule(projects, workspaces, git);
-        const fileSearch = new WorkspaceFileSearchModule();
-        unwind.unshift(async () => fileSearch.close());
+        unwind.unshift(async () => await files.close());
 
         const profile = new ProfileModule<LibSQLDatabase>();
         const murmur = new MurmurModule<LibSQLDatabase>(config, profile);
@@ -329,7 +326,6 @@ export async function startHappyAgentRuntime(
             workspaces,
             terminals,
             files,
-            fileSearch,
             git,
             history,
             permissions,
@@ -350,7 +346,6 @@ export async function startHappyAgentRuntime(
             config,
             contextWindow,
             events,
-            fileSearch,
             files,
             goal,
             happy,
@@ -402,6 +397,7 @@ export async function startHappyAgentRuntime(
             projects,
             titles,
             workspaces,
+            files,
             secrets,
             collaboration,
             workflows,

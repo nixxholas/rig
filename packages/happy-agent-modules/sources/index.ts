@@ -19,9 +19,6 @@ export { quoteVisibleExact } from "./impl/quoteVisibleExact.js";
 // Files: safe, project- and workspace-rooted filesystem access.
 export * from "./files/index.js";
 
-// Workspace file search: bounded fuzzy indexes for composer mentions and API search.
-export * from "./workspaceFileSearch/index.js";
-
 // Happy: the optional mobile connection and its durable remote projection.
 export * from "./happy/index.js";
 export * from "./api/index.js";

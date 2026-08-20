@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, realpath, rm, unlink } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -9,8 +9,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { GitModule } from "../../sources/git/index.js";
 import {
     fileRevisionQuerySchema,
+    projectFilesEventSchema,
     ProjectFileError,
     ProjectFilesModule,
+    type ProjectFilesEvent,
     type ProjectFileRoot,
 } from "../../sources/files/index.js";
 import type { ProjectsModule } from "../../sources/projects/index.js";
@@ -38,6 +40,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+    await files.close();
     await rm(directory, { force: true, recursive: true });
 });
 
@@ -52,6 +55,41 @@ describe("ProjectFilesModule writes", () => {
             path: root.root,
             projectId: root.projectId,
         });
+    });
+
+    it("emits a validated, frozen file-change event after a successful write", async () => {
+        const events: ProjectFilesEvent[] = [];
+        const unsubscribe = files.onEvent((_ctx, event) => {
+            events.push(event);
+        });
+
+        await files.write(root, write("new file", null));
+        await vi.waitFor(() => expect(events).toHaveLength(1));
+
+        expect(Value.Check(projectFilesEventSchema, events[0])).toBe(true);
+        expect(events[0]).toMatchObject({
+            paths: ["note.txt"],
+            type: "files_changed",
+            workspaceId: root.projectId,
+        });
+        expect(Object.isFrozen(events[0])).toBe(true);
+        expect(Object.isFrozen(events[0]?.paths)).toBe(true);
+        unsubscribe();
+    });
+
+    it("emits an exact path when a rendered file changes outside the module", async () => {
+        await writeFile(join(directory, "note.txt"), "before", "utf8");
+        const events: ProjectFilesEvent[] = [];
+        files.onEvent((_ctx, event) => {
+            events.push(event);
+        });
+        await files.read(root, { path: "note.txt" });
+
+        await writeFile(join(directory, "note.txt"), "after", "utf8");
+
+        await vi.waitFor(() =>
+            expect(events.some((event) => event.paths?.includes("note.txt"))).toBe(true),
+        );
     });
 
     it("creates missing parent directories beneath the confined root", async () => {
