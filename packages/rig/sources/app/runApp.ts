@@ -158,7 +158,7 @@ export async function runApp(ctx: Context, options: RunAppOptions = {}): Promise
                 agent: bootstrap.agent,
                 bootstrap,
                 config: configResponse.config,
-                eventCursor: bootstrap.cursor,
+                eventCursor: history.cursor < bootstrap.cursor ? history.cursor : bootstrap.cursor,
                 history,
                 localServer,
                 pendingQuestion: pendingQuestion.question,
@@ -519,10 +519,7 @@ async function followAgentEvents(options: {
                     sessionId: options.agent.id,
                     type: "message_submitted",
                 });
-            } else if (
-                event.type === "run.started" &&
-                event.payload.agentId === options.agent.id
-            ) {
+            } else if (event.type === "run.started" && event.payload.agentId === options.agent.id) {
                 activeRunId = event.payload.run.id;
                 if (event.payload.acceptedMessageIds.length > 0) {
                     options.app.applySessionEvent({

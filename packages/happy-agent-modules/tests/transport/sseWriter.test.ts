@@ -37,6 +37,30 @@ describe("Happy Agent SSE writer", () => {
         response.emit("drain");
         expect(response.writes).toEqual(["blocked\n\n"]);
     });
+
+    it("keeps an image-sized event and later run events ordered across backpressure", async () => {
+        const request = new EventEmitter() as IncomingMessage;
+        const response = new FakeResponse([false, true, true]);
+        const writer = createSseWriter(request, response.asServerResponse(), {
+            maxBufferedBytes: 64 * 1_024 * 1_024,
+            maxWritableBytes: 64 * 1_024 * 1_024,
+        });
+        const image = `id: image\nevent: message.created\ndata: ${"A".repeat(48 * 1_024 * 1_024)}\n\n`;
+        const run = "id: run\nevent: run.started\ndata: {}\n\n";
+        const tool = "id: tool\nevent: message.updated\ndata: {}\n\n";
+
+        expect(writer.write(image)).toBe(true);
+        expect(writer.write(run)).toBe(true);
+        expect(writer.write(tool)).toBe(true);
+        expect(writer.closed).toBe(false);
+        expect(response.writes).toEqual([image]);
+
+        response.emit("drain");
+        expect(response.writes).toEqual([image, run, tool]);
+        expect(writer.closed).toBe(false);
+        writer.close();
+        await writer.done;
+    });
 });
 
 class FakeResponse extends EventEmitter {

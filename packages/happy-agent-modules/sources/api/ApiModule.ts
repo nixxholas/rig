@@ -67,7 +67,12 @@ import {
     type TerminalEvent,
     type TerminalScope,
 } from "../terminals/index.js";
-import { createNodeBinaryWebSocket, WebSocketDuplex } from "../transport/index.js";
+import {
+    createNodeBinaryWebSocket,
+    createSseWriter,
+    type SseWriter,
+    WebSocketDuplex,
+} from "../transport/index.js";
 import {
     UsageModule,
     type UsageCurrentContext,
@@ -122,8 +127,9 @@ import {
 } from "./ApiSchemas.js";
 import { WorkspaceProxy } from "./WorkspaceProxy.js";
 
-const API_PROTOCOL_VERSION = 21;
+const API_PROTOCOL_VERSION = 22;
 const MAX_JSON_BODY_BYTES = 48 * 1024 * 1024;
+const MAX_SSE_BUFFER_BYTES = 64 * 1024 * 1024;
 const HEARTBEAT_MS = 15_000;
 const TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 const MAX_TERMINAL_WIRE_MESSAGE_BYTES = 4 * 1024 * 1024 + 20;
@@ -175,10 +181,11 @@ export class ApiModule implements AgentModule {
         string,
         {
             committed: Record<string, unknown>[];
-            current: readonly Record<string, unknown>[];
+            current: Record<string, unknown>[];
             messageId: string;
         }
     >();
+    readonly #streamingDeltaOffsets = new Map<string, number[]>();
     readonly #journal = new MutationAwareApiEventJournal(this.#mutationIds);
     readonly #webSockets = new WebSocketServer({
         maxPayload: MAX_TERMINAL_WIRE_MESSAGE_BYTES,
@@ -187,7 +194,7 @@ export class ApiModule implements AgentModule {
     });
     readonly #workspaceProxy = new WorkspaceProxy();
     readonly #unsubscribe: (() => void)[] = [];
-    readonly #streams = new Set<ServerResponse>();
+    readonly #streams = new Set<SseWriter>();
     readonly #shutdownListeners = new Set<() => void | Promise<void>>();
     readonly #loopStarts = new Map<
         string,
@@ -313,7 +320,9 @@ export class ApiModule implements AgentModule {
         this.#ready = false;
         for (const unsubscribe of this.#unsubscribe.splice(0)) unsubscribe();
         this.#shutdownListeners.clear();
-        for (const stream of this.#streams) stream.end();
+        const streamDone = [...this.#streams].map((stream) => stream.done);
+        for (const stream of this.#streams) stream.close();
+        await Promise.all(streamDone);
         this.#streams.clear();
         this.#announcedPendingMessages.clear();
         this.#apiPendingMessageIds.clear();
@@ -1006,6 +1015,7 @@ export class ApiModule implements AgentModule {
         if (event.type === "loop.settled") {
             this.#flushAcceptedMessages(agentId);
             this.#streamingAssistantBlocks.delete(agentId);
+            this.#streamingDeltaOffsets.delete(agentId);
             const run = this.#activeRuns.get(agentId);
             if (run === undefined) {
                 await this.#appendAgentUpdate(ctx, event, {
@@ -1177,7 +1187,12 @@ export class ApiModule implements AgentModule {
                 streaming.current = [];
                 return;
             }
-            this.#streamingAssistantBlocks.set(agentId, { committed: [], current: [], messageId });
+            this.#streamingAssistantBlocks.set(agentId, {
+                committed: [],
+                current: [],
+                messageId,
+            });
+            this.#streamingDeltaOffsets.set(agentId, []);
             this.#journal.append(
                 "message.created",
                 {
@@ -1197,6 +1212,7 @@ export class ApiModule implements AgentModule {
         }
         if (type === "block_reset") {
             this.#streamingAssistantBlocks.delete(agentId);
+            this.#streamingDeltaOffsets.delete(agentId);
             this.#journal.append(
                 "message.deleted",
                 { agentId, runId, messageId },
@@ -1209,23 +1225,44 @@ export class ApiModule implements AgentModule {
         if (type === "text_delta" || type === "thinking_delta") {
             const blockIndex = rigEvent?.["contentIndex"];
             const append = rigEvent?.["delta"];
+            const block =
+                typeof blockIndex === "number" && streaming?.messageId === messageId
+                    ? streaming.current[blockIndex]
+                    : undefined;
             if (
                 typeof blockIndex === "number" &&
                 Number.isSafeInteger(blockIndex) &&
                 blockIndex >= 0 &&
                 typeof append === "string"
             ) {
+                const absoluteBlockIndex = committed.length + blockIndex;
+                const offsets = this.#streamingDeltaOffsets.get(agentId) ?? [];
+                const offset = offsets[absoluteBlockIndex] ?? 0;
                 this.#journal.append(
                     "message.delta",
                     {
                         agentId,
                         runId,
                         messageId,
-                        blockIndex: committed.length + blockIndex,
+                        blockIndex: absoluteBlockIndex,
+                        offset,
                         append,
                     },
                     event.occurredAt,
                 );
+                offsets[absoluteBlockIndex] = offset + append.length;
+                this.#streamingDeltaOffsets.set(agentId, offsets);
+                if (
+                    streaming !== undefined &&
+                    (block?.["type"] === "text" || block?.["type"] === "reasoning") &&
+                    typeof block["text"] === "string"
+                ) {
+                    streaming.current = streaming.current.map((candidate, index) =>
+                        index === blockIndex
+                            ? { ...candidate, text: block["text"] + append }
+                            : candidate,
+                    );
+                }
             }
             return;
         }
@@ -1234,7 +1271,17 @@ export class ApiModule implements AgentModule {
         const content = providerMessageContent(partial?.["content"], reviewedToolCalls(historical));
         if (content === undefined) return;
         if (streaming !== undefined && streaming.messageId === messageId) {
-            streaming.current = content;
+            streaming.current = [...content];
+            const offsets = this.#streamingDeltaOffsets.get(agentId) ?? [];
+            for (const [index, block] of content.entries()) {
+                if (
+                    (block["type"] === "text" || block["type"] === "reasoning") &&
+                    typeof block["text"] === "string"
+                ) {
+                    offsets[committed.length + index] = block["text"].length;
+                }
+            }
+            this.#streamingDeltaOffsets.set(agentId, offsets);
         }
         this.#journal.append(
             "message.updated",
@@ -2050,6 +2097,9 @@ export class ApiModule implements AgentModule {
         url: URL,
         agentId: string,
     ): Promise<void> {
+        // Capture first so a concurrent message change is either visible in history or replayed
+        // after this cursor. Stable identities and offset-addressed deltas make overlap harmless.
+        const cursor = this.#journal.cursor();
         const before = optionalApiId(url.searchParams.get("before"), "run");
         const after = optionalApiId(url.searchParams.get("after"), "message");
         if (before !== undefined && after !== undefined) {
@@ -2064,6 +2114,7 @@ export class ApiModule implements AgentModule {
             limit,
         });
         sendJson(response, 200, {
+            cursor,
             runs: await Promise.all(
                 page.runs.map(async (run) => {
                     const runUsage = await this.#usage.readRun(ctx, agentId, run.id);
@@ -2328,16 +2379,32 @@ export class ApiModule implements AgentModule {
             ? optionalCursor(supplied[0] ?? null)
             : optionalCursor(supplied);
         let replaying = true;
-        let overflowed = false;
         const pending: ApiEvent[] = [];
-        const unsubscribe = this.#journal.subscribe((event) => {
-            if (response.destroyed || response.writableEnded) return;
+        response.writeHead(200, {
+            "cache-control": "no-store",
+            connection: "keep-alive",
+            "content-type": "text/event-stream; charset=utf-8",
+            "x-accel-buffering": "no",
+        });
+        const writer = createSseWriter(request, response, {
+            maxBufferedBytes: MAX_SSE_BUFFER_BYTES,
+            maxWritableBytes: MAX_SSE_BUFFER_BYTES,
+        });
+        this.#streams.add(writer);
+        let heartbeat: NodeJS.Timeout | undefined;
+        let unsubscribe = (): void => undefined;
+        void writer.done.then(() => {
+            if (heartbeat !== undefined) clearInterval(heartbeat);
+            unsubscribe();
+            this.#streams.delete(writer);
+        });
+        unsubscribe = this.#journal.subscribe((event) => {
+            if (writer.closed) return;
             if (replaying) {
                 pending.push(event);
-                if (pending.length > 10_000) overflowed = true;
                 return;
             }
-            if (!writeSseEvent(response, event)) response.end();
+            writer.write(sseEventFrame(event));
         });
         const current = this.#journal.cursor();
         const gap = after !== undefined && !this.#journal.hasCursor(after);
@@ -2345,15 +2412,8 @@ export class ApiModule implements AgentModule {
             after === undefined || gap
                 ? []
                 : (this.#journal.replay(after, current, 10_000)?.events ?? []);
-        response.writeHead(200, {
-            "cache-control": "no-store",
-            connection: "keep-alive",
-            "content-type": "text/event-stream; charset=utf-8",
-            "x-accel-buffering": "no",
-        });
-        this.#streams.add(response);
         if (
-            !response.write(
+            !writer.write(
                 `event: hello\ndata: ${JSON.stringify({
                     cursor: current,
                     gap,
@@ -2362,43 +2422,20 @@ export class ApiModule implements AgentModule {
                 })}\n\n`,
             )
         ) {
-            unsubscribe();
-            response.end();
             return;
         }
         for (const event of replay) {
-            if (!writeSseEvent(response, event)) {
-                unsubscribe();
-                response.end();
-                return;
-            }
+            if (!writer.write(sseEventFrame(event))) return;
         }
         replaying = false;
-        if (overflowed) {
-            unsubscribe();
-            response.end();
-            return;
-        }
         for (const event of pending) {
-            if (event.cursor > current && !writeSseEvent(response, event)) {
-                unsubscribe();
-                response.end();
-                return;
-            }
+            if (event.cursor > current && !writer.write(sseEventFrame(event))) return;
         }
         pending.splice(0);
-        const heartbeat = setInterval(() => {
-            if (response.destroyed || response.writableEnded) return;
-            if (!response.write(`: heartbeat ${Date.now()}\n\n`)) response.end();
+        heartbeat = setInterval(() => {
+            writer.heartbeat(`: heartbeat ${Date.now()}\n\n`);
         }, HEARTBEAT_MS);
         heartbeat.unref();
-        const close = () => {
-            clearInterval(heartbeat);
-            unsubscribe();
-            this.#streams.delete(response);
-        };
-        request.once("close", close);
-        response.once("close", close);
     }
 
     async #handleProjectRoute(
@@ -3868,10 +3905,8 @@ function httpStatusText(status: number): string {
     return "Internal Server Error";
 }
 
-function writeSseEvent(response: ServerResponse, event: ApiEvent): boolean {
-    return response.write(
-        `id: ${event.cursor}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`,
-    );
+function sseEventFrame(event: ApiEvent): string {
+    return `id: ${event.cursor}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`;
 }
 
 function optionalCursor(value: string | null | undefined): string | undefined {

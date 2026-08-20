@@ -17,7 +17,7 @@ describe("public message and history matrix", () => {
     it("MH-01 starts with an empty complete history", async () => {
         const gym = await startGym();
         const history = await gym.client.getMessages(gym.defaultSessionId);
-        expect(history).toEqual({ hasMore: false, runs: [] });
+        expect(history).toEqual({ cursor: expect.any(String), hasMore: false, runs: [] });
         await expect(gym.client.getAgentBootstrap(gym.defaultSessionId)).resolves.toMatchObject({
             pending: [],
         });
@@ -340,12 +340,13 @@ describe("public message and history matrix", () => {
 
     it("MH-14 emits deltas and reconstructs split streaming text from history", async () => {
         const gym = await startGym({
-            inference: [
-                {
-                    content: [{ text: "streamed text", type: "text" }],
-                    textDeltaChunkSize: 3,
-                },
-            ],
+            inference: (request) =>
+                request.instructions.includes("You name a piece of work")
+                    ? { content: [{ text: "Streamed text", type: "text" }] }
+                    : {
+                          content: [{ text: "streamed text", type: "text" }],
+                          textDeltaChunkSize: 3,
+                      },
         });
         const accepted = await gym.send("stream");
         const events = await gym.events();
@@ -355,6 +356,16 @@ describe("public message and history matrix", () => {
         );
         expect(deltas.length).toBeGreaterThan(1);
         expect(deltas.map((event) => event.payload.append).join("")).toContain("streamed text");
+        for (let index = 1; index < deltas.length; index += 1) {
+            const previous = deltas[index - 1];
+            const current = deltas[index];
+            if (previous === undefined || current === undefined) {
+                throw new Error("The streamed delta sequence was incomplete.");
+            }
+            expect(current.payload.offset).toBe(
+                previous.payload.offset + previous.payload.append.length,
+            );
+        }
         const history = await gym.client.getMessages(gym.defaultSessionId);
         expect(
             textOf(history.runs.find((run) => run.id === accepted.runId)?.messages.at(-1)),

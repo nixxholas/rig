@@ -1,4 +1,5 @@
 import type { Context } from "@steve.kite/stdlib";
+import { applyMessageDelta } from "@slopus/happy-agent-client";
 import type {
     Agent as ApiAgent,
     AgentBootstrapResponse,
@@ -90,6 +91,7 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
     #pending: ApiUserMessage[];
     readonly #messages = new Map<string, ApiMessage>();
     readonly #messageEventResults = new Map<string, ApiMessage | typeof MESSAGE_DELETED>();
+    readonly #messageDeltaAppends = new Map<string, string>();
     /** The streamed assistant message of each run, so a finished run can decorate it. */
     readonly #assistantMessageIdsByRunId = new Map<string, string>();
     /** The service record of each run, so a failed run can surface its error report. */
@@ -574,15 +576,17 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
             return undefined;
         }
         const block = message.content[event.payload.blockIndex];
+        const append = this.#messageDeltaAppends.get(event.cursor);
+        if (append === undefined || append.length === 0) return undefined;
         if (block?.type === "reasoning") {
             return {
                 type: "thinking_delta",
                 contentIndex: event.payload.blockIndex,
-                delta: event.payload.append,
+                delta: append,
             };
         }
         if (block?.type === "text") {
-            return { type: "text_delta", delta: event.payload.append };
+            return { type: "text_delta", delta: append };
         }
         return undefined;
     }
@@ -675,6 +679,8 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
         this.#pending = structuredClone(bootstrap.pending);
         this.#history = history;
         this.#messages.clear();
+        this.#messageEventResults.clear();
+        this.#messageDeltaAppends.clear();
         for (const run of history.runs) {
             for (const message of run.messages) this.#messages.set(message.id, message);
         }
@@ -737,16 +743,13 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
             }
         } else if (event.type === "message.delta") {
             const current = this.#messages.get(event.payload.messageId);
-            const block = current?.content[event.payload.blockIndex];
-            if (current !== undefined && (block?.type === "text" || block?.type === "reasoning")) {
-                result = {
-                    ...current,
-                    content: current.content.map((candidate, index) =>
-                        index === event.payload.blockIndex
-                            ? { ...block, text: block.text + event.payload.append }
-                            : candidate,
-                    ),
-                };
+            const application = applyMessageDelta(current, event.payload);
+            if (application.kind === "reconcile") {
+                this.#messageDeltaAppends.set(event.cursor, "");
+                void this.resync().catch(() => undefined);
+            } else {
+                result = application.message;
+                this.#messageDeltaAppends.set(event.cursor, application.append);
                 this.#messages.set(result.id, result);
             }
         } else if (event.type === "message.deleted") {
@@ -757,7 +760,10 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
             this.#messageEventResults.set(event.cursor, result);
             if (this.#messageEventResults.size > 512) {
                 const oldest = this.#messageEventResults.keys().next().value as string | undefined;
-                if (oldest !== undefined) this.#messageEventResults.delete(oldest);
+                if (oldest !== undefined) {
+                    this.#messageEventResults.delete(oldest);
+                    this.#messageDeltaAppends.delete(oldest);
+                }
             }
         }
         return result;
