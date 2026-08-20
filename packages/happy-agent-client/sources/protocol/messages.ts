@@ -210,6 +210,8 @@ export type ToolPermissionReview =
 
 interface ToolCallBlockBase {
     type: "tool_call";
+    /** The provider's stable identity for this invocation. */
+    id: string;
     name: string;
     status: "running" | "completed" | "failed";
     /** Raw tool arguments; absent under `omitToolData`. */

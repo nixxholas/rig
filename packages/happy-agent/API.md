@@ -1447,6 +1447,7 @@ recognize as this object grows.
 ```json
 {
     "type": "tool_call",
+    "id": "call-7",
     "name": "exec_command",
     "status": "completed",
     "arguments": { "cmd": "pnpm test" },
@@ -1466,8 +1467,9 @@ recognize as this object grows.
 }
 ```
 
-`status` is `"running"`, `"completed"`, or `"failed"`; `arguments` and `result` are the raw
-tool data; `presentation` is defined below.
+`id` is the provider's stable identity for this invocation and is identical in live updates and
+durable history. `status` is `"running"`, `"completed"`, or `"failed"`; `arguments` and `result`
+are the raw tool data; `presentation` is defined below.
 
 - `compaction` — one complete context-compaction lifecycle, inside a `service` message:
 
@@ -1749,6 +1751,7 @@ Response — `200`:
                         },
                         {
                             "type": "tool_call",
+                            "id": "call-12",
                             "name": "Bash",
                             "arguments": { "command": "grep -rn redirect sources/auth" },
                             "status": "completed",
