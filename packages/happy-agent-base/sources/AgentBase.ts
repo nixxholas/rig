@@ -448,7 +448,7 @@ export class AgentBase {
     #steering: QueueEntry[] = [];
     /** The durable send queue, in the order its keys sort. */
     #sends: QueueEntry[] = [];
-    /** A committed queue write that the next turn still has to reload from storage. */
+    /** A committed outer-transaction queue write not yet merged into the in-memory queues. */
     #committedQueueDirty = false;
     /** Hook notices waiting to join history after tool settlement and compaction. */
     #injections: InjectionEntry[] = [];
@@ -1318,9 +1318,9 @@ export class AgentBase {
     }
 
     /**
-     * Publish a transactionally accepted message only after the outermost commit. The next turn
-     * reloads the durable queue instead of copying staged entries into memory; the dirty marker
-     * prevents a turn already in flight from clearing the request before that reload happens.
+     * Publish a transactionally accepted message only after the outermost commit. The next safe
+     * queue boundary merges its durable queue entries into memory; the dirty marker prevents a
+     * turn already in flight from clearing the request before that merge.
      */
     async #activateCommittedMessages(
         offeredIds: readonly string[],
@@ -2250,6 +2250,12 @@ export class AgentBase {
                     break;
                 }
                 await this.#finishAdmittedQueueWrites();
+                // A message accepted through an outer transaction becomes visible only after
+                // that transaction commits. Merge those durable queue entries here, at the same
+                // safe boundary where independently accepted messages are already visible, so
+                // steering committed during a tool batch reaches the next inference without
+                // rebuilding unrelated conversation or tool state in the middle of the turn.
+                if (this.#committedQueueDirty) await this.#refreshCommittedQueues(ctx);
                 let injected = await this.#consumeQueue(
                     ctx,
                     this.#steering,
@@ -3118,6 +3124,66 @@ export class AgentBase {
         await this.#withTransactionalContext(hookCtx, (liveCtx) => hook(liveCtx, argument));
     }
 
+    /** Restore one queued message envelope from durable storage. */
+    #restoreQueueEntry(key: string, value: unknown): QueueEntry {
+        const envelope = value as {
+            readonly id: string;
+            readonly message: AgentQueuedMessage;
+            readonly metadata?: AgentMessageMetadata;
+            readonly options?: AgentBaseMessageOptions;
+        };
+        if (!Value.Check(cuid2Schema, envelope.id)) {
+            throw new Error(`The queued message under "${key}" has an invalid ID.`);
+        }
+        const metadata = ownAgentMessageMetadata(envelope.metadata);
+        return {
+            key,
+            id: envelope.id,
+            message: envelope.message,
+            ...(metadata === undefined ? {} : { metadata }),
+            options: envelope.options ?? {},
+        };
+    }
+
+    /**
+     * Merge queue entries published by outer transactions into memory without reloading the
+     * conversation. An independently accepted message can publish its in-memory entry while the
+     * reads are in flight, so merging by durable key preserves both paths and sorting restores the
+     * queues' durable FIFO order. Clearing the marker before each read means a commit racing that
+     * read raises it again and gets another pass before this boundary continues.
+     */
+    async #refreshCommittedQueues(ctx: Context): Promise<void> {
+        while (this.#committedQueueDirty) {
+            this.#committedQueueDirty = false;
+            try {
+                const queueCtx = this.#workContext(ctx);
+                const [steering, sends] = await Promise.all([
+                    this.#persistence.readValues(queueCtx, "steering."),
+                    this.#persistence.readValues(queueCtx, "send."),
+                ]);
+                const merge = (
+                    queue: QueueEntry[],
+                    stored: readonly { readonly key: string; readonly value: unknown }[],
+                ): void => {
+                    const known = new Set(queue.map(({ key }) => key));
+                    for (const { key, value } of stored) {
+                        if (known.has(key)) continue;
+                        queue.push(this.#restoreQueueEntry(key, value));
+                        known.add(key);
+                    }
+                    queue.sort((left, right) =>
+                        left.key < right.key ? -1 : left.key > right.key ? 1 : 0,
+                    );
+                };
+                merge(this.#steering, steering);
+                merge(this.#sends, sends);
+            } catch (error) {
+                this.#committedQueueDirty = true;
+                throw error;
+            }
+        }
+    }
+
     /**
      * Replace the in-memory state with the durable one. Durable queue acceptance guarantees every
      * message already in memory reached storage first, so the load result supersedes memory
@@ -3141,27 +3207,8 @@ export class AgentBase {
             // still decide whether it needs a compaction.
             const measured = context[0]?.value as { readonly tokens: number } | undefined;
             this.#contextTokens = measured?.tokens;
-            const entry = (key: string, value: unknown): QueueEntry => {
-                const envelope = value as {
-                    readonly id: string;
-                    readonly message: AgentQueuedMessage;
-                    readonly metadata?: AgentMessageMetadata;
-                    readonly options?: AgentBaseMessageOptions;
-                };
-                if (!Value.Check(cuid2Schema, envelope.id)) {
-                    throw new Error(`The queued message under "${key}" has an invalid ID.`);
-                }
-                const metadata = ownAgentMessageMetadata(envelope.metadata);
-                return {
-                    key,
-                    id: envelope.id,
-                    message: envelope.message,
-                    ...(metadata === undefined ? {} : { metadata }),
-                    options: envelope.options ?? {},
-                };
-            };
-            this.#steering = steering.map(({ key, value }) => entry(key, value));
-            this.#sends = sends.map(({ key, value }) => entry(key, value));
+            this.#steering = steering.map(({ key, value }) => this.#restoreQueueEntry(key, value));
+            this.#sends = sends.map(({ key, value }) => this.#restoreQueueEntry(key, value));
             this.#injections = injections.map(({ key, value }) => ({
                 key,
                 message: structuredClone(value as SessionSystemMessage),

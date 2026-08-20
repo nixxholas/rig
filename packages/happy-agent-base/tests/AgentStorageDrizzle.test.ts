@@ -1,11 +1,12 @@
 import { sql } from "drizzle-orm";
+import { Type } from "@sinclair/typebox";
 import {
     afterCommit,
     createContextNamespace,
     createRootContext,
     type Context,
 } from "@steve.kite/stdlib";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
     AgentStorage,
@@ -13,17 +14,21 @@ import {
     agentDatabase,
     agentDatabaseRows,
     agentDatabaseRun,
+    defineAgentTool,
     withAgentDatabase,
     type AgentDatabase,
     type AgentModule,
     type AgentStorageLock,
     type AnyAgentTool,
 } from "../sources/index.js";
+import { AgentPersistenceDrizzle } from "../sources/AgentPersistenceDrizzle.js";
 import { inMemoryStorageLock, providersOf, textTurn, user } from "./gym/fixtures.js";
 import { databaseBackends } from "./gym/databaseBackends.js";
 import { ScriptedProvider } from "./gym/ScriptedProvider.js";
 
 const ctx = createRootContext().named("agent-storage-drizzle-test");
+
+afterEach(() => vi.restoreAllMocks());
 
 function lock(): (ctx: Context) => Promise<AgentStorageLock> {
     return inMemoryStorageLock();
@@ -428,6 +433,70 @@ describe.each(databaseBackends)("AgentStorage Drizzle persistence ($label)", ({ 
         );
         await system.close(ctx);
         await close();
+    });
+
+    it("merges transactional steering after a tool batch without reloading history", async () => {
+        const loadHistory = vi.spyOn(AgentPersistenceDrizzle.prototype, "load");
+        const { close, database } = await open();
+        const rootCtx = withAgentDatabase(ctx, database);
+        const provider = new ScriptedProvider([
+            [
+                { type: "toolcall_start", callId: "call-1", name: "steer" },
+                { type: "toolcall_end", callId: "call-1", arguments: "{}" },
+                { type: "done", state: "tool_call", tokens: { input: 1, output: 1 } },
+            ],
+            textTurn("answered with steering"),
+        ]);
+        let agentId = "";
+        let system!: AgentSystemLocal<typeof database>;
+        const steeringTool = defineAgentTool({
+            name: "steer",
+            returnType: Type.Object({ value: Type.String() }),
+            shouldReviewInAutoMode: () => false,
+            execute: async () => {
+                await rootCtx.inTx(async (txCtx) => {
+                    await system.steer(txCtx, agentId, user("transactional steering"), {
+                        id: "h12345678901234567890145",
+                    });
+                });
+                return { value: "finished" };
+            },
+            toLLM: (result) => [{ type: "text", text: result.value }],
+        });
+        const module: AgentModule<AnyAgentTool, typeof database> = {
+            name: "transactional-steering-test",
+            beforeStart: () => ({ tools: () => [steeringTool] }),
+        };
+        system = await AgentSystemLocal.create(
+            ctx,
+            new AgentStorage({ acquireLock: lock(), database }),
+            {
+                models: [],
+                modules: [module],
+                provider: "scripted",
+                providers: providersOf(provider),
+            },
+        );
+        const agent = await system.create(ctx, {});
+        agentId = agent.id;
+
+        await agent.send(ctx, user("go"));
+        await agent.waitForIdle();
+
+        const requests = provider.sessions[0]?.requests ?? [];
+        const historyLoads = loadHistory.mock.calls.length;
+        await system.close(ctx);
+        await close();
+        expect(historyLoads).toBe(1);
+        expect(requests).toHaveLength(2);
+        expect(requests[1]?.context.messages.slice(-2)).toEqual([
+            {
+                role: "tool",
+                callId: "call-1",
+                content: [{ type: "text", text: "finished" }],
+            },
+            user("transactional steering"),
+        ]);
     });
 
     it("transactionally delivers to an unloaded idle target", async () => {

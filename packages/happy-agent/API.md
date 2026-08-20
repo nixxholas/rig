@@ -1346,10 +1346,12 @@ Response — `200`:
 A message is one durable entry in the conversation; a **run** is the work the agent does in
 response — inference, tool calls, compaction, and everything until the next explicit boundary.
 Sending a message to an idle agent starts a run immediately; sending to a working agent queues the
-message, and it starts its run when the current one ends. User steering is the only boundary that
-finishes one run and starts its successor without first going idle. Automatic compaction stays
-inside the active run. Explicit compaction starts its own maintenance run because history is
-grouped by run; it never emits `run.boundary`.
+message, and it starts its run when the current one ends. Steering does not cancel active inference
+or tool execution. It waits for the current assistant response and its complete tool-call batch to
+finish, then accepts every pending steering message before the next inference request. User
+steering is the only boundary that finishes one run and starts its successor without first going
+idle. Automatic compaction stays inside the active run. Explicit compaction starts its own
+maintenance run because history is grouped by run; it never emits `run.boundary`.
 
 Every run has the same metadata:
 
@@ -1623,8 +1625,9 @@ Request:
   travel **inline**, base64 in the block, exactly as they later appear in history — there is
   no separate upload step or attachment store.
 - `delivery` — optional, default `"queue"`. `"queue"` waits behind the current run; `"steer"`
-  interrupts it, putting the message in front of the model immediately, mid-run. On an idle
-  agent the two are identical: a run starts.
+  takes priority at the next inference boundary. The current assistant response and its complete
+  tool-call batch finish without interruption, then pending steering messages are accepted before
+  the next inference request. On an idle agent the two are identical: a run starts.
 - `mode` — required: the model selection and permission mode this message runs with, validated
   against the config catalog. An unknown or disabled model is `400`.
 
@@ -1633,11 +1636,11 @@ own message in every event and history load by the identity it already holds.
 
 A sent message is **pending** first: the daemon holds it durably, but it is not yet part of the
 real history — it has no run. It stays pending until inference **accepts** it — a queued
-message when its run starts, a steering message when it is actually placed in front of the
-model. Acceptance assigns the `runId` and moves the message into history; sending to an idle
-agent accepts immediately. Both states are visible to every client: the pending message
-appears in the agent bootstrap response and in events, so a second device shows what the first one
-sent even before the model has seen it.
+message when its run starts, a steering message at the next inference boundary after the current
+response and tool batch. Acceptance assigns the `runId` and moves the message into history;
+sending to an idle agent accepts immediately. Both states are visible to every client: the pending
+message appears in the agent bootstrap response and in events, so a second device shows what the
+first one sent even before the model has seen it.
 
 Response — `202`: the durable message as it now stands, plus the event cursor at send:
 
