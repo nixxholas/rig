@@ -94,6 +94,13 @@ describe("happy-plugins client", () => {
                             checkedAt: 42,
                             error: null,
                             providerId: "codex-work",
+                            tokens: {
+                                inferences: 3,
+                                input: 120,
+                                output: 45,
+                                total: 165,
+                                turns: 2,
+                            },
                             usage: {
                                 capturedAt: 40,
                                 credits: null,
