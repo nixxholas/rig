@@ -46,7 +46,7 @@ const USER_MESSAGE_COUNT_KEY = "title-user-messages";
 const titleUserMessageCountSchema = Type.Union([Type.Literal(1), Type.Literal(2)]);
 
 /**
- * Titles generated from user-role messages, outside the agent's own inference path.
+ * Titles generated from accepted user-role messages, outside the agent's own inference path.
  *
  * The first accepted user message is the complete input to initial naming. The second accepted
  * user message triggers one refinement from committed history, which already includes that new
@@ -58,8 +58,10 @@ const titleUserMessageCountSchema = Type.Union([Type.Literal(1), Type.Literal(2)
  * updates run through a detached context and a module-owned async resource, so no caller waits for
  * them and no agent-turn async-local state leaks into them.
  *
- * The module also exposes the lower-level helpers that can name an eligible workspace and branch
- * from a message. Workspace names are independent from the automatic chat-title lifecycle.
+ * Initial naming resolves the workspace the agent or one of its ancestors belongs to. An eligible
+ * placeholder workspace asks for its slug in the same request as the title, then asynchronously
+ * takes that workspace and Git branch name while the agent continues working. The second-message
+ * refinement changes only the generated chat title.
  */
 export class TitlesModule implements AgentModule<AnyAgentTool> {
     readonly name = "titles";
@@ -67,7 +69,7 @@ export class TitlesModule implements AgentModule<AnyAgentTool> {
     readonly #backgroundScope = new AsyncResource("happy-agent-titles");
     readonly #config: ConfigModule;
     readonly #history: HistoryModule;
-    readonly #titleTasks = new Map<string, Promise<void>>();
+    readonly #namingTasks = new Map<string, Promise<void>>();
     readonly #workspaces: WorkspacesModule;
     #agents: AgentSystemRef | undefined;
     #closed = false;
@@ -101,6 +103,7 @@ export class TitlesModule implements AgentModule<AnyAgentTool> {
                 this.#store = scope.sharedKV;
             },
             messageAcceptedTransact: async (hookCtx, scope, accepted) => {
+                this.#store ??= scope.sharedKV;
                 if (accepted.message.role !== "user") return;
                 const message = acceptedMessageText(accepted);
                 if (message.length === 0) return;
@@ -109,9 +112,20 @@ export class TitlesModule implements AgentModule<AnyAgentTool> {
                 if (count >= 2) return;
                 const next = count + 1;
                 await scope.kv.write(hookCtx, USER_MESSAGE_COUNT_KEY, next);
-                if (next === 1 && typeof scope.agent.metadata?.title === "string") return;
                 let transcript: string | undefined;
                 if (next === 2) {
+                    const currentTitle = scope.agent.metadata?.title;
+                    if (
+                        typeof currentTitle === "string" &&
+                        !(await this.#isCurrentGeneratedTitle(
+                            hookCtx,
+                            scope.sharedKV,
+                            scope.agent.id,
+                            currentTitle,
+                        ))
+                    ) {
+                        return;
+                    }
                     try {
                         const excerpt = await this.#history.readExcerpt(
                             hookCtx,
@@ -137,7 +151,7 @@ export class TitlesModule implements AgentModule<AnyAgentTool> {
                 const committedTranscript = transcript;
                 afterCommit(hookCtx, () => {
                     if (next === 1) {
-                        this.#startInitialTitle(scope.agent.id, scope.agent.provider, message);
+                        this.#startInitialNaming(scope.agent.id, scope.agent.provider, message);
                     } else if (committedTranscript !== undefined) {
                         this.#startTitleRefinement(
                             scope.agent.id,
@@ -150,18 +164,18 @@ export class TitlesModule implements AgentModule<AnyAgentTool> {
         };
     };
 
-    /** Stop accepting title work and drain the bounded requests already in flight. */
+    /** Stop accepting naming work and drain the bounded requests already in flight. */
     async close(): Promise<void> {
         if (this.#closed) return;
         this.#closed = true;
         this.#lifetime = undefined;
-        await Promise.allSettled(this.#titleTasks.values());
-        this.#titleTasks.clear();
+        await Promise.allSettled(this.#namingTasks.values());
+        this.#namingTasks.clear();
         this.#backgroundScope.emitDestroy();
         this.#agents = undefined;
     }
 
-    /** Generate the initial title from the first accepted user-role message alone. */
+    /** Generate the initial title and eligible workspace name from the first user message. */
     async #nameFromFirstUserMessage(
         ctx: Context,
         agentId: string,
@@ -172,16 +186,28 @@ export class TitlesModule implements AgentModule<AnyAgentTool> {
             const agents = this.#agents;
             if (agents === undefined) return;
             const config = await agents.config(ctx, agentId);
-            if (config === undefined || typeof config.metadata?.title === "string") return;
-            const names = await this.suggestNames(ctx, {
+            if (config === undefined) return;
+            let workspace: { readonly projectId: string; readonly workspaceId: string } | undefined;
+            try {
+                workspace = await this.#workspaceForAgent(ctx, agents, agentId);
+            } catch (error) {
+                ctx.log.debug(
+                    "The workspace for first-message naming could not be resolved.",
+                    { agentId },
+                    error,
+                );
+            }
+            const names = await this.nameFromFirstMessage(ctx, {
                 firstMessage: message,
                 providerId,
-                wanted: { title: true },
+                sessionNamed: typeof config.metadata?.title === "string",
+                ...(workspace === undefined ? {} : { workspace }),
             });
             if (this.#closed || names.title === undefined) return;
             const latest = await agents.config(ctx, agentId);
             if (latest === undefined || typeof latest.metadata?.title === "string") return;
             await agents.updateMetadata(ctx, agentId, { title: names.title });
+            await this.#recordGeneratedTitle(ctx, agentId, names.title);
         } catch (error) {
             ctx.log.debug(
                 "Naming an agent from its first user message did not happen.",
@@ -189,6 +215,28 @@ export class TitlesModule implements AgentModule<AnyAgentTool> {
                 error,
             );
         }
+    }
+
+    /** The child workspace an agent inherits through its ancestry, when it has one. */
+    async #workspaceForAgent(
+        ctx: Context,
+        agents: AgentSystemRef,
+        agentId: string,
+    ): Promise<{ readonly projectId: string; readonly workspaceId: string } | undefined> {
+        let current = agentId;
+        for (let depth = 0; depth < 64; depth += 1) {
+            const workspaceId = await this.#workspaces.workspaceForAgent(ctx, current);
+            if (workspaceId !== undefined) {
+                const workspace = await this.#workspaces.get(ctx, workspaceId);
+                return workspace === undefined
+                    ? undefined
+                    : { projectId: workspace.projectRef, workspaceId };
+            }
+            const parent = await agents.parentOf(ctx, current);
+            if (parent === null) return undefined;
+            current = parent;
+        }
+        throw new Error("The agent ancestry exceeds the supported depth.");
     }
 
     /** Reconsider the title once, from committed history that includes the second user message. */
@@ -204,6 +252,17 @@ export class TitlesModule implements AgentModule<AnyAgentTool> {
             const config = await agents.config(ctx, agentId);
             if (config === undefined) return;
             const currentTitle = config.metadata?.title;
+            if (
+                typeof currentTitle === "string" &&
+                !(await this.#isCurrentGeneratedTitle(
+                    ctx,
+                    this.#requireStore(),
+                    agentId,
+                    currentTitle,
+                ))
+            ) {
+                return;
+            }
             const title = await this.refineChat(ctx, {
                 transcript,
                 providerId,
@@ -213,6 +272,7 @@ export class TitlesModule implements AgentModule<AnyAgentTool> {
             const latest = await agents.config(ctx, agentId);
             if (latest === undefined || latest.metadata?.title !== currentTitle) return;
             await agents.updateMetadata(ctx, agentId, { title });
+            await this.#recordGeneratedTitle(ctx, agentId, title);
         } catch (error) {
             ctx.log.debug(
                 "Refining an agent title from its second user message did not happen.",
@@ -222,25 +282,25 @@ export class TitlesModule implements AgentModule<AnyAgentTool> {
         }
     }
 
-    /** Start the initial detached title task, preserving any task already queued for this agent. */
-    #startInitialTitle(agentId: string, providerId: string, message: string): void {
-        this.#enqueueTitleTask(agentId, "initial-title", async (ctx) => {
+    /** Start detached initial naming, preserving any task already queued for this agent. */
+    #startInitialNaming(agentId: string, providerId: string, message: string): void {
+        this.#enqueueNamingTask(agentId, "initial-naming", async (ctx) => {
             await this.#nameFromFirstUserMessage(ctx, agentId, message, providerId);
         });
     }
 
-    /** Start the one detached refinement after any initial title task finishes. */
+    /** Start the one detached refinement after any initial naming task finishes. */
     #startTitleRefinement(agentId: string, providerId: string, transcript: string): void {
-        this.#enqueueTitleTask(agentId, "title-refinement", async (ctx) => {
+        this.#enqueueNamingTask(agentId, "title-refinement", async (ctx) => {
             await this.#refineFromSecondUserMessage(ctx, agentId, providerId, transcript);
         });
     }
 
-    /** Serialize this agent's title requests without returning their promise to the agent loop. */
-    #enqueueTitleTask(agentId: string, name: string, work: (ctx: Context) => Promise<void>): void {
+    /** Serialize this agent's naming requests without returning their promise to the agent loop. */
+    #enqueueNamingTask(agentId: string, name: string, work: (ctx: Context) => Promise<void>): void {
         const lifetime = this.#lifetime;
         if (this.#closed || lifetime === undefined) return;
-        const previous = this.#titleTasks.get(agentId);
+        const previous = this.#namingTasks.get(agentId);
         let task!: Promise<void>;
         task = (previous ?? Promise.resolve())
             .then(
@@ -250,9 +310,9 @@ export class TitlesModule implements AgentModule<AnyAgentTool> {
                     ),
             )
             .finally(() => {
-                if (this.#titleTasks.get(agentId) === task) this.#titleTasks.delete(agentId);
+                if (this.#namingTasks.get(agentId) === task) this.#namingTasks.delete(agentId);
             });
-        this.#titleTasks.set(agentId, task);
+        this.#namingTasks.set(agentId, task);
     }
 
     /**
@@ -372,6 +432,30 @@ export class TitlesModule implements AgentModule<AnyAgentTool> {
         return parseSuggestedNames(answer, { title: true }).title;
     }
 
+    /** Record the exact generated title that remains eligible for one later refinement. */
+    async #recordGeneratedTitle(ctx: Context, sessionId: string, title: string): Promise<void> {
+        const record = { title };
+        if (!Value.Check(generatedTitleRecordSchema, record)) {
+            throw new Error("Generated title is invalid.");
+        }
+        await this.#generatedTitles(this.#requireStore()).write(ctx, sessionId, record);
+    }
+
+    /** Whether the current title is still the one automatic naming last wrote. */
+    async #isCurrentGeneratedTitle(
+        ctx: Context,
+        store: AgentKV,
+        sessionId: string,
+        title: string,
+    ): Promise<boolean> {
+        const stored = await this.#generatedTitles(store).read(ctx, sessionId);
+        return Value.Check(generatedTitleRecordSchema, stored) && stored.title === title;
+    }
+
+    #generatedTitles(store: AgentKV): AgentKV {
+        return store.scoped("generated-titles");
+    }
+
     /** Whether a workspace has already taken the name of a chat. */
     async workspaceWasNamed(ctx: Context, workspaceId: string): Promise<boolean> {
         assertWorkspaceId(workspaceId);
@@ -466,3 +550,9 @@ function assertWorkspaceId(workspaceId: string): void {
         throw new Error("Workspace ID is invalid.");
     }
 }
+
+/** The automatic title whose provenance permits the one later refinement. */
+const generatedTitleRecordSchema = Type.Object(
+    { title: Type.String({ minLength: 1, maxLength: 512 }) },
+    { additionalProperties: false },
+);

@@ -105,6 +105,47 @@ describe("first-message naming", () => {
         ).toBe(true);
     }, 30_000);
 
+    it("propagates the first generated session name to its placeholder workspace", async () => {
+        const gym = await startGym();
+        const root = await rootWorkspace(gym);
+        const placeholder = (
+            await gym.client.createWorkspace({
+                mutationId: "first-message-placeholder-workspace",
+                name: "Workspace",
+                nameConfigured: false,
+                parentId: root.id,
+            })
+        ).workspace;
+        await gym.waitUntil(async () => {
+            const workspace = (await gym.client.getWorkspace(placeholder.id)).workspace;
+            return workspace.initialization.status === "ready" ? workspace : undefined;
+        }, "the placeholder workspace to become ready");
+        expect((await gym.client.getWorkspace(placeholder.id)).workspace.nameSource).toBe(
+            "generated",
+        );
+
+        const agent = (
+            await gym.client.createAgent({
+                id: "firstmessageworkspaceagent",
+                mutationId: "first-message-workspace-agent",
+                workspaceId: placeholder.id,
+            })
+        ).agent;
+        await gym.send("Investigate why the project file list is empty.", {
+            sessionId: agent.id,
+        });
+
+        const renamed = await gym.waitUntil(async () => {
+            const workspace = (await gym.client.getWorkspace(placeholder.id)).workspace;
+            return workspace.name === "project-file-list" ? workspace : undefined;
+        }, "the first generated session name to propagate to its workspace");
+        expect(renamed.nameSource).toBe("generated");
+        expect(renamed.git?.branch).toBe("worktree/project-file-list");
+        expect((await gym.client.getAgent(agent.id)).agent.title).toBe(
+            "Project file list investigation",
+        );
+    }, 30_000);
+
     it("refines once from history including the second user message", async () => {
         const gym = await createAgentGym({
             inference: (request) => {
@@ -196,4 +237,20 @@ async function startGym(): Promise<AgentGym> {
     });
     activeGyms.add(gym);
     return gym;
+}
+
+async function rootWorkspace(gym: AgentGym) {
+    const project = (await gym.client.listProjects()).projects.find((candidate) =>
+        candidate.agents.some((agent) => agent.id === gym.defaultSessionId),
+    );
+    if (project === undefined) throw new Error("The gym did not expose its root project.");
+    return await gym.waitUntil(async () => {
+        try {
+            const workspace = (await gym.client.getWorkspace(project.id)).workspace;
+            return workspace.initialization.status === "ready" ? workspace : undefined;
+        } catch (error) {
+            if ((error as { readonly status?: unknown }).status === 409) return undefined;
+            throw error;
+        }
+    }, "the root workspace to become ready");
 }

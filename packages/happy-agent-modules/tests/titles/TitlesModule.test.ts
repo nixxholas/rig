@@ -313,6 +313,46 @@ describe("TitlesModule user-message lifecycle", () => {
             "Internal wake-up",
         );
     });
+
+    it("never generates over or refines a title chosen before the conversation", async () => {
+        const test = await titles([textTurn("<title>A model replacement</title>")]);
+        const metadata: Record<string, unknown> = { title: "Deliberate title" };
+        const agents = {
+            config: () => Promise.resolve({ metadata }),
+            updateMetadata: vi.fn(() => Promise.resolve()),
+        } as unknown as AgentSystemRef;
+        const hooks = await resolveModuleHooks(lifecycleDatabase.context, test.module, agents);
+        const persistence = new InMemoryPersistence();
+        const scope = {
+            agent: {
+                id: "deliberately-titled-agent",
+                metadata,
+                provider: "scripted",
+            },
+            historyKV: new AgentKV(persistence, "history."),
+            kv: new AgentKV(persistence, "agent."),
+            runKV: new AgentKV(persistence, "run."),
+            sharedKV: new AgentKV(persistence, "shared."),
+        } as AgentModuleScope;
+
+        for (const [id, text] of [
+            ["first-user-message", "Investigate the retry policy."],
+            ["second-user-message", "Now rewrite it."],
+        ] as const) {
+            await lifecycleDatabase.context.inTx(async (txCtx) => {
+                await hooks.messageAcceptedTransact?.(txCtx, scope, {
+                    id,
+                    kind: "send",
+                    message: { role: "user", content: [{ type: "text", text }] },
+                });
+            });
+        }
+        await test.module.close();
+
+        expect(test.provider.sessions).toHaveLength(0);
+        expect(agents.updateMetadata).not.toHaveBeenCalled();
+        expect(metadata["title"]).toBe("Deliberate title");
+    });
 });
 
 describe("TitlesModule naming from a first message", () => {

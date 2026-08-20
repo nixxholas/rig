@@ -1,23 +1,25 @@
 # Titles
 
-Automatic chat titles, plus lower-level helpers for naming a workspace and branch from a message.
+Automatic chat titles, plus combined first-message naming for eligible placeholder workspaces.
 
 A chat opened without a title gets one from its first accepted text-bearing `user` message. The
 message role is the whole trigger: provenance is not inspected, so the behavior is identical when
-the message came through the API, a tool, or another in-process caller. The second accepted user
-message triggers one refinement from committed history including that new message; later messages
-do not generate title requests.
+the message came through the API, a tool, or another in-process caller. When the chat belongs to an
+eligible placeholder workspace, the same request gives its workspace and Git branch a slug.
 
-Both requests start only after the accepting transaction commits. They run through a detached
-module-owned context and async resource, so message acceptance and the agent's real inference
-proceed independently and the API module has no title behavior.
+Initial naming starts after the accepting transaction commits and runs through a detached
+module-owned context and async resource. Message acceptance and the agent's real inference proceed
+in parallel with it; the workspace and branch are renamed asynchronously when the slug arrives.
+The second accepted user message triggers one detached title refinement from committed history
+including that new message. Later messages do not generate naming requests.
 
 ## How a name is written
 
-Initial chat naming asks only for a title and sends only the first user message. It does not include
-history, agent output, tool output, or transport metadata. Lower-level callers may also ask for a
-workspace slug. The folder and Git branch share that slug because they are the same piece of work
-under two filesystems.
+Combined initial naming sends only the first user message. It does not include history, agent
+output, tool output, or transport metadata. It resolves the workspace attached to the agent or one
+of its ancestors and asks for the workspace slug in the same request as the title. The folder and
+Git branch share that slug because they are the same piece of work under two filesystems. A title
+or workspace name someone deliberately chose is never replaced.
 
 The request runs on its own provider session, outside the agent loop, so nothing it says reaches the
 history a person reads or the context the agent works from. Each of the first two user-message
@@ -46,10 +48,15 @@ called". The title it was given is the answer unless the conversation plainly co
 a title that keeps moving is worse than one that was slightly wrong — a person looking for the chat
 again is looking for the name they last saw.
 
+Only the exact title automatic naming last wrote is eligible. A title supplied during agent
+creation, or one a user or agent changed afterwards, has no generated-title provenance and is
+final. Refinement checks that provenance both when the second message commits and immediately
+before inference, so a deliberate rename racing the task still wins.
+
 It happens once and off the critical path. The per-agent user-message counter advances in the same
 transaction that accepts each message, so restarts and concurrent sends cannot buy duplicate title
 requests. If the second message arrives before initial naming finishes, its refinement waits behind
-that title task while the agent itself keeps working.
+that naming task while the agent itself keeps working.
 
 The workspace and the branch get no second look at all. A folder and a Git ref are named once,
 because renaming either would move it out from under agents already working there.
@@ -58,22 +65,22 @@ because renaming either would move it out from under agents already working ther
 
 `new TitlesModule(config, history, workspaces)`.
 
-| Module                                        | Why                                                                               |
-| --------------------------------------------- | --------------------------------------------------------------------------------- |
-| [`ConfigModule`](../config/README.md)         | The accounts a name is written on, and the catalog the cheapest model comes from. |
-| [`HistoryModule`](../history/README.md)       | The committed conversation read after the second accepted user message.           |
-| [`WorkspacesModule`](../workspaces/README.md) | The catalog used by the lower-level workspace and branch naming helpers.          |
+| Module                                        | Why                                                                                 |
+| --------------------------------------------- | ----------------------------------------------------------------------------------- |
+| [`ConfigModule`](../config/README.md)         | The accounts a name is written on, and the catalog the cheapest model comes from.   |
+| [`HistoryModule`](../history/README.md)       | The committed conversation read after the second accepted user message.             |
+| [`WorkspacesModule`](../workspaces/README.md) | Agent placement and the catalog that applies a generated workspace and branch name. |
 
 Nothing else is passed in. One name may take ten seconds, and that is a constant here rather than
-a setting: it bounds detached naming work and is the module's own. The message and the agent's real
-work do not wait on this clock.
+a setting: it bounds detached naming work and is the module's own. The message and agent do not
+wait on this clock.
 
 ## Public methods
 
 - `nameFromFirstMessage(ctx, { firstMessage, providerId?, sessionNamed?, workspace? })` —
-  the whole thing. It settles what is still wanted, hands the folder name to the workspaces catalog
-  itself, and answers with the chat title. It never throws: the message and turn it is naming are
-  already on their way.
+  the combined operation used by automatic initial naming. It settles what is still wanted, hands
+  the folder name to the workspaces catalog itself, and answers with the chat title. It never
+  throws: the message and turn it is naming are already on their way.
 - `suggestNames(ctx, { firstMessage, wanted, providerId? }, { signal? })` — the names alone, without
   writing any of them anywhere.
 - `refineChat(ctx, { transcript, currentTitle?, providerId? }, { signal? })` — the second look, given
@@ -86,7 +93,10 @@ work do not wait on this clock.
 
 No tables. The per-agent `title-user-messages` key records whether one or two text-bearing user-role
 messages have committed. It is capped at two because later messages never trigger title work. The
-shared Agent KV store retains the workspace naming fact used by the lower-level helpers.
+shared Agent KV store retains generated-title provenance and the workspace naming fact.
+
+Under `generated-titles` is the exact title automatic naming last wrote for each agent. A different
+current title is deliberate and cannot be refined over.
 
 Under `named` are the workspaces that have already been named from a chat. A workspace takes the name
 of its first chat once and never again; the key is only written once a name has actually arrived, so
