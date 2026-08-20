@@ -191,6 +191,33 @@ describe("compute implementation contracts", () => {
         });
     });
 
+    it("walks a root that is itself a file as that one file", async () => {
+        const compute = new FakeCompute();
+        compute.write("/workspace/src/main.ts", "main");
+
+        await expect(
+            walkComputeFiles(compute.fs, permissions, "/workspace/src/main.ts"),
+        ).resolves.toMatchObject({
+            files: [{ path: "/workspace/src/main.ts" }],
+            truncated: false,
+        });
+    });
+
+    it("searches a file named directly instead of reporting no matches", async () => {
+        const compute = new FakeCompute();
+        compute.write("/workspace/src/main.ts", "const needle = 1;\n");
+
+        const found = await searchComputeFileContents(compute, ctx, {
+            pattern: "needle",
+            path: "/workspace/src/main.ts",
+            outputMode: "content",
+            limit: 10,
+        });
+
+        expect(found.matchedFiles).toBe(1);
+        expect(found.matches).toEqual(["/workspace/src/main.ts:1: const needle = 1;"]);
+    });
+
     it("supports multiline search when the tool explicitly requests it", async () => {
         const compute = new FakeCompute();
         compute.write("/workspace/example.ts", "first line\nsecond line\n");

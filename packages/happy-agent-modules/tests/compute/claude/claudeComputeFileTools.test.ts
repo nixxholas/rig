@@ -314,6 +314,20 @@ describe("Claude's Glob and Grep", () => {
         ]);
     });
 
+    it("searches a single file when the path names one", async () => {
+        const { compute, tool, call } = await machine();
+        compute.write("/workspace/src/a.ts", "one\nneedle here\nthree");
+
+        const result = await tool("Grep").execute(
+            ctx,
+            { pattern: "needle", path: "/workspace/src/a.ts", output_mode: "content" },
+            call,
+        );
+
+        expect(result.match_count).toBe(1);
+        expect(result.text).toBe("/workspace/src/a.ts:2: needle here");
+    });
+
     it("says plainly when nothing matched", async () => {
         const { compute, tool, call } = await machine();
         compute.write("/workspace/src/a.ts", "nothing of interest");

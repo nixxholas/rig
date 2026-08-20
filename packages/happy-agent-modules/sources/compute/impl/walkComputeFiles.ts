@@ -53,6 +53,21 @@ export async function walkComputeFiles(
     root: string,
     options: { respectGitIgnore?: boolean } = {},
 ): Promise<WalkedTree> {
+    // A root that is itself a file is the whole walk. Treating it as a directory read a
+    // directory listing off a file, which failed, which read as an empty tree — and a search
+    // over an empty tree answered "no matches" about a file that was never opened. A file the
+    // caller named directly is also searched even where an ignore rule would have hidden it.
+    try {
+        const rootStat = await fs.stat(permissions, root);
+        if (!rootStat.isDirectory) {
+            return {
+                files: [{ path: root, mtimeMs: rootStat.mtimeMs, size: rootStat.size }],
+                truncated: false,
+            };
+        }
+    } catch {
+        // A root that cannot be inspected walks as the empty tree it always was.
+    }
     const files: WalkedFile[] = [];
     const respectGitIgnore = options.respectGitIgnore === true;
     const initialScopes = respectGitIgnore
