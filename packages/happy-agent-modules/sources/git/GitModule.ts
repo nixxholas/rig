@@ -24,10 +24,6 @@ import { listGitWorkingTreeFiles, type GitWorkingTreeFiles } from "./listGitWork
 import { normalizeFuturePath } from "./normalizeFuturePath.js";
 import { normalizeProjectCwd } from "./normalizeProjectCwd.js";
 import { parseHostingRepository, type HostingRepository } from "./parseHostingRepository.js";
-import {
-    prepareWorkspaceTransfer,
-    type PreparedWorkspaceTransfer,
-} from "./prepareWorkspaceTransfer.js";
 import { probeGitRepository, type GitRepositoryProbe } from "./probeGitRepository.js";
 import { readGitCommonDir } from "./readGitCommonDir.js";
 import { readGitFileAtRevision, type GitRevisionFile } from "./readGitFileAtRevision.js";
@@ -130,8 +126,8 @@ interface CachedSnapshot {
  *
  * Everything the product does with a repository runs through here: reading facts and change
  * snapshots, probing a folder, cloning a remote, cutting and retiring worktrees, renaming
- * branches, transferring a workspace, brokering repository credentials, and watching repositories
- * for change. It reaches Git itself rather than being handed a runner, and unattended reads go
+ * branches, brokering repository credentials, and watching repositories for change. It reaches
+ * Git itself rather than being handed a runner, and unattended reads go
  * through the hardened read-only scanner while mutations and network work use the foreground one.
  *
  * Snapshots compare against the merge base with origin/main, include committed, staged, unstaged,
@@ -508,24 +504,6 @@ export class GitModule implements AgentModule {
             workspacePath: options.workspacePath,
         });
         this.invalidate(options.workspacePath);
-    }
-
-    /**
-     * Stages one workspace's contents onto another and hands back a transfer that can be
-     * committed or rolled back. A failure restores the target rather than leaving it half written.
-     */
-    async prepareWorkspaceTransfer(options: {
-        readonly beforeApply?: () => void | Promise<void>;
-        readonly credential?: GitCredentialRef;
-        readonly sourcePath: string;
-        readonly targetPath: string;
-    }): Promise<PreparedWorkspaceTransfer> {
-        return await prepareWorkspaceTransfer({
-            git: this.#foregroundFor(options.credential),
-            sourcePath: options.sourcePath,
-            targetPath: options.targetPath,
-            ...(options.beforeApply === undefined ? {} : { beforeApply: options.beforeApply }),
-        });
     }
 
     // --- Repository credentials ------------------------------------------------------------

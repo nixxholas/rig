@@ -217,7 +217,6 @@ export const workspaceMutationOperationSchema = Type.Union([
     Type.Literal("complete_archive"),
     Type.Literal("apply_git_facts"),
     Type.Literal("apply_probe"),
-    Type.Literal("transfer"),
 ]);
 
 /** Host-observed Git state for one workspace. */

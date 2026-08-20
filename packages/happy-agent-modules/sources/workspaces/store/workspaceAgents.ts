@@ -57,20 +57,22 @@ export async function insertWorkspaceAgent(
     );
 }
 
-export async function moveWorkspaceAgent(
+export async function updateWorkspaceAgentOrder(
     database: AgentDatabase,
-    association: WorkspaceAgentAssociation,
+    workspaceId: string,
+    agentId: string,
+    orderKey: string,
 ): Promise<void> {
     const changed = await agentDatabaseRows<{ readonly agent_id: string }>(
         database,
         sql`UPDATE ${sql.raw(WORKSPACE_AGENTS_TABLE)}
-            SET workspace_id = ${association.workspaceId},
-                order_key = ${association.orderKey}
-            WHERE agent_id = ${association.agentId}
+            SET order_key = ${orderKey}
+            WHERE workspace_id = ${workspaceId}
+              AND agent_id = ${agentId}
             RETURNING agent_id`,
     );
     if (changed.length !== 1) {
-        throw new Error(`Agent "${association.agentId}" is not attached to a workspace.`);
+        throw new Error(`Agent "${agentId}" is not attached to that workspace.`);
     }
 }
 

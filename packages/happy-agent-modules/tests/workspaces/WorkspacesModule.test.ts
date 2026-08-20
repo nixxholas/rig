@@ -11,6 +11,7 @@ import {
     workspaceSchema,
 } from "../../sources/workspaces/index.js";
 import { moduleDatabase } from "../support/moduleDatabase.js";
+import { primaryAgents, resolveModuleHooks } from "../support/moduleHooks.js";
 import { temporaryWorkspacesCatalog } from "../support/workspacesModule.js";
 
 function workspaceDatabase(name: string): ReturnType<typeof moduleDatabase> {
@@ -67,6 +68,33 @@ describe("WorkspacesModule", () => {
         expect(Value.Check(workspaceSchema, withoutPath)).toBe(false);
         const { kind: _kind, ...withoutKind } = ROW;
         expect(Value.Check(workspaceSchema, withoutKind)).toBe(false);
+    });
+
+    it("does not expose a tool for transferring an agent between workspaces", async () => {
+        const { workspaces } = await temporaryWorkspacesCatalog();
+        const database = workspaceDatabase("workspaces-tool-surface-test");
+        await database.ready;
+        try {
+            const hooks = await resolveModuleHooks(
+                database.context,
+                workspaces,
+                primaryAgents(),
+            );
+            const tools = await hooks.tools?.(database.context, {
+                agent: { id: "agent-1" },
+            } as never);
+
+            expect(tools?.map((tool) => tool.name)).toEqual([
+                "create_workspace",
+                "list_workspaces",
+                "get_workspace",
+                "rename_workspace",
+                "archive_workspace",
+                "get_workspace_branch_metadata",
+            ]);
+        } finally {
+            database.close();
+        }
     });
 
     it("drops obsolete replay tables in the forward migration", async () => {
@@ -216,17 +244,18 @@ describe("WorkspacesModule", () => {
             const restarted = new WorkspacesModule(config, projects, git);
             expect(await restarted.listAgents(database.context, "workspace-1")).toEqual(reordered);
 
-            await workspaces.attachAgent(database.context, "workspace-2", "agent-1");
+            await expect(
+                workspaces.attachAgent(database.context, "workspace-2", "agent-1"),
+            ).rejects.toThrow('Agent "agent-1" is already attached to workspace "workspace-1".');
             expect(await workspaces.workspaceForAgent(database.context, "agent-1")).toBe(
-                "workspace-2",
+                "workspace-1",
             );
             expect(await workspaces.listAgentIds(database.context, "workspace-1")).toEqual([
                 "agent-3",
+                "agent-1",
                 "agent-2",
             ]);
-            expect(await workspaces.listAgentIds(database.context, "workspace-2")).toEqual([
-                "agent-1",
-            ]);
+            expect(await workspaces.listAgentIds(database.context, "workspace-2")).toEqual([]);
             expect(events).toEqual([
                 "workspace_created",
                 "workspace_created",
@@ -234,8 +263,6 @@ describe("WorkspacesModule", () => {
                 "workspace_agent_attached",
                 "workspace_agent_attached",
                 "workspace_agent_reordered",
-                "workspace_agent_detached",
-                "workspace_agent_attached",
             ]);
         } finally {
             unsubscribe();

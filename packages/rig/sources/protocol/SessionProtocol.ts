@@ -756,21 +756,6 @@ export interface CreateSessionRequest {
     projectId?: string;
 }
 
-export const transferSessionRequestSchema = Type.Object(
-    {
-        targetWorkspaceId: Type.String({ minLength: 1 }),
-    },
-    { additionalProperties: false },
-);
-
-export type TransferSessionRequest = Static<typeof transferSessionRequestSchema>;
-
-export interface TransferSessionResponse {
-    commit: string;
-    session: ProtocolSession;
-    state: "succeeded";
-}
-
 export interface UpdateSessionRequest {
     appendSystemPrompt: string | null;
     mutationId?: string;

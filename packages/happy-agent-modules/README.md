@@ -143,7 +143,7 @@ its public methods, and its storage and event contracts.
 | [Search](sources/search/README.md)                    | A bounded common `web_fetch` plus explicit per-vendor search tool wrappers.                                                                              |
 | [Image generation](sources/imageGeneration/README.md) | Prompt-to-PNG on the configured Codex accounts, including edits from local paths or recent conversation images.                                          |
 | [Gemini](sources/gemini/README.md)                    | Image and music generation and questions about local media files, on a Gemini key of its own.                                                            |
-| [Git](sources/git/README.md)                          | Reading, probing, and watching repositories, and the worktree, clone, and transfer actions the catalogs perform. No hooks, no tools.                     |
+| [Git](sources/git/README.md)                          | Reading, probing, and watching repositories, and the worktree and clone actions the catalogs perform. No hooks, no tools.                               |
 
 ### Work
 
@@ -172,7 +172,7 @@ its public methods, and its storage and event contracts.
 | Module                                     | What it adds                                                                                    |
 | ------------------------------------------ | ----------------------------------------------------------------------------------------------- |
 | [Projects](sources/projects/README.md)     | Repositories registered on demand, with bounded settings and durable rename and archival.       |
-| [Workspaces](sources/workspaces/README.md) | Isolated worktrees cut from a project, created, inspected, transferred, and archived.           |
+| [Workspaces](sources/workspaces/README.md) | Isolated worktrees cut from a project, created, inspected, and archived.                        |
 | [Secrets](sources/secrets/README.md)       | Safe secret metadata and attachments; a value is resolved without ever showing it to the model. |
 | [Terminals](sources/terminals/README.md)   | Real pseudo-terminals on a project or workspace folder, shared by everyone looking at it.       |
 

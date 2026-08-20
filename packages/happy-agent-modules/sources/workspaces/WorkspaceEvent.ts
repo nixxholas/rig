@@ -4,10 +4,8 @@ import type { Context } from "@steve.kite/stdlib";
 import {
     MAX_WORKSPACE_EVENT_ID_LENGTH,
     workspaceAgentIdSchema,
-    workspaceIdSchema,
     workspaceNameSchema,
     workspaceOrderKeySchema,
-    workspaceProjectRefSchema,
     workspaceSchema,
     workspaceTimestampSchema,
 } from "./Workspace.js";
@@ -66,16 +64,6 @@ export const workspaceEventSchema = Type.Union([
     Type.Object(
         {
             ...eventEnvelope,
-            type: Type.Literal("workspace_transferred"),
-            workspace: workspaceSchema,
-            previousWorkspace: workspaceSchema,
-            previousProjectRef: Type.Optional(workspaceProjectRefSchema),
-        },
-        { additionalProperties: false },
-    ),
-    Type.Object(
-        {
-            ...eventEnvelope,
             type: Type.Literal("workspace_renamed"),
             workspace: workspaceSchema,
             previousWorkspace: workspaceSchema,
@@ -105,28 +93,8 @@ export const workspaceEventSchema = Type.Union([
     Type.Object(
         {
             ...eventEnvelope,
-            type: Type.Literal("workspace_transfer_scheduled"),
-            targetWorkspaceId: workspaceIdSchema,
-        },
-        { additionalProperties: false },
-    ),
-    Type.Object(
-        {
-            ...eventEnvelope,
             type: Type.Literal("workspace_agent_attached"),
             association: workspaceAgentAssociationSchema,
-            previousWorkspaceId: Type.Optional(workspaceIdSchema),
-            workspace: workspaceSchema,
-            previousWorkspace: workspaceSchema,
-        },
-        { additionalProperties: false },
-    ),
-    Type.Object(
-        {
-            ...eventEnvelope,
-            type: Type.Literal("workspace_agent_detached"),
-            agentId: workspaceAgentIdSchema,
-            nextWorkspaceId: workspaceIdSchema,
             workspace: workspaceSchema,
             previousWorkspace: workspaceSchema,
         },

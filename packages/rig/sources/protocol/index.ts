@@ -550,8 +550,6 @@ export type {
     UpdateGlobalInstructionsRequest,
     UpdateGlobalInstructionsResponse,
     UpdateSessionRequest,
-    TransferSessionRequest,
-    TransferSessionResponse,
     UserInputRequestedEvent,
     GetPresenceResponse,
     SetPresenceResponse,
@@ -673,7 +671,6 @@ export {
     moveSessionRequestSchema,
     submitContextMessageRequestSchema,
     sessionScopeSchema,
-    transferSessionRequestSchema,
     updateDaemonConfigRequestSchema,
 } from "./SessionProtocol.js";
 export {

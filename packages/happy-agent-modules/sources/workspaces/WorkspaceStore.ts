@@ -46,14 +46,6 @@ import {
     type WorkspacePageQuery,
     type WorkspaceList,
 } from "./WorkspacePage.js";
-import {
-    workspaceTransferInputSchema,
-    workspaceTransferResultSchema,
-    workspaceTransferStoreResultSchema,
-    type WorkspaceTransferInput,
-    type WorkspaceTransferResult,
-    type WorkspaceTransferStoreResult,
-} from "./WorkspaceTransfer.js";
 import { byOrder, orderKeyBetween } from "./store/workspaceOrdering.js";
 import {
     assertWorkspace,
@@ -176,7 +168,7 @@ export const workspaceMutationResultSchema = Type.Object(
 
 export const workspaceTransactionChangeSchema = Type.Object(
     {
-        result: Type.Union([workspaceMutationResultSchema, workspaceTransferResultSchema]),
+        result: workspaceMutationResultSchema,
         event: Type.Optional(workspaceEventSchema),
     },
     { additionalProperties: false },
@@ -228,10 +220,6 @@ export const workspaceStoreSchema = Type.Object(
         completeArchive: mutation(workspaceStoreWorkspaceInputSchema),
         applyGitFacts: mutation(workspaceStoreApplyGitFactsInputSchema),
         applyProbe: mutation(workspaceStoreApplyProbeInputSchema),
-        transfer: Type.Function(
-            [workspaceContextSchema, workspaceTransferInputSchema, workspaceMutationRequestSchema],
-            Type.Promise(workspaceTransferStoreResultSchema),
-        ),
     },
     { additionalProperties: false },
 );
@@ -261,9 +249,6 @@ export type {
     WorkspaceBranchMetadata,
     WorkspacePage,
     WorkspacePageQuery,
-    WorkspaceTransferInput,
-    WorkspaceTransferResult,
-    WorkspaceTransferStoreResult,
 };
 
 export { orderKeyBetween, sameJson, workspaceMigrations, assertWorkspace };
@@ -299,14 +284,6 @@ export function assertWorkspaceMutationResult(
 ): asserts value is WorkspaceMutationResult {
     if (!Value.Check(workspaceMutationResultSchema, value)) {
         throw new Error("Workspace store returned an invalid mutation result.");
-    }
-}
-
-export function assertWorkspaceTransferResult(
-    value: unknown,
-): asserts value is WorkspaceTransferResult {
-    if (!Value.Check(workspaceTransferResultSchema, value)) {
-        throw new Error("Workspace store returned an invalid transfer result.");
     }
 }
 
@@ -566,51 +543,6 @@ export function createWorkspaceStore(catalog: WorkspacesModule): WorkspaceStore 
                 const probed: Workspace = { ...next, presence: input.presence };
                 return sameJson(probed, before) ? undefined : probed;
             }),
-
-        transfer: async (ctx, input, operation) => {
-            const database = ctx.db;
-            const result = await defaultWorkspaceTransfer(ctx, input, operation, now);
-            if (Value.Check(workspaceSchema, result)) {
-                const current = await readWorkspace(database, result.id);
-                if (current === undefined) {
-                    throw new Error("Workspace transfer named a workspace that is not there.");
-                }
-                const stored = await writeWorkspace(
-                    database,
-                    { ...result, version: current.version + 1 },
-                    current.version,
-                );
-                return {
-                    operationId: operation.operationId,
-                    changed: true,
-                    state: "transferred",
-                    workspace: {
-                        id: stored.id,
-                        projectRef: stored.projectRef,
-                        path: stored.path,
-                    },
-                };
-            }
-            if (result.state === "transferred") {
-                const current = await readWorkspace(database, result.workspace.id);
-                if (current === undefined) {
-                    throw new Error("Workspace transfer named a workspace that is not there.");
-                }
-                if (current.projectRef !== result.workspace.projectRef) {
-                    await writeWorkspace(
-                        database,
-                        {
-                            ...current,
-                            projectRef: result.workspace.projectRef,
-                            version: current.version + 1,
-                            updatedAt: Math.max(now(), current.updatedAt + 1),
-                        },
-                        current.version,
-                    );
-                }
-            }
-            return result;
-        },
     };
 }
 
@@ -668,66 +600,6 @@ function assertExpectedVersion(
     if (expectedVersion !== undefined && workspace.version !== expectedVersion) {
         throw new Error(message);
     }
-}
-
-async function defaultWorkspaceTransfer(
-    ctx: Context,
-    input: WorkspaceTransferInput,
-    operation: WorkspaceMutationRequest,
-    now: () => number,
-): Promise<WorkspaceTransferResult> {
-    const database = ctx.db;
-    if ("targetWorkspaceId" in input) {
-        const target = await readWorkspace(database, input.targetWorkspaceId);
-        if (target === undefined) {
-            throw new Error(`Workspace "${input.targetWorkspaceId}" was not found.`);
-        }
-        await writeWorkspace(
-            database,
-            {
-                ...target,
-                version: target.version + 1,
-                updatedAt: Math.max(now(), target.updatedAt + 1),
-            },
-            target.version,
-        );
-        return {
-            operationId: operation.operationId,
-            changed: true,
-            state: "scheduled",
-            targetWorkspaceId: input.targetWorkspaceId,
-        };
-    }
-    const workspace = await readWorkspace(database, input.workspaceId);
-    if (workspace === undefined) throw new Error(`Workspace "${input.workspaceId}" was not found.`);
-    const changed = workspace.projectRef !== input.targetProjectRef;
-    if (changed) {
-        const children = await readWorkspaceChildren(database, workspace.projectRef, workspace.id);
-        if (children.length > 0) {
-            throw new Error("A workspace with nested workspaces cannot move to another project.");
-        }
-        await writeWorkspace(
-            database,
-            {
-                ...workspace,
-                projectRef: input.targetProjectRef,
-                parentId: input.targetProjectRef,
-                version: workspace.version + 1,
-                updatedAt: Math.max(now(), workspace.updatedAt + 1),
-            },
-            workspace.version,
-        );
-    }
-    return {
-        operationId: operation.operationId,
-        changed,
-        state: "transferred",
-        workspace: {
-            id: workspace.id,
-            projectRef: input.targetProjectRef,
-            path: workspace.path,
-        },
-    };
 }
 
 export type { WorkspaceReserveHooks };

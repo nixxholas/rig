@@ -101,17 +101,9 @@ describe("workspace lifecycle event versions", () => {
                 database.context,
                 first.workspace.id,
             );
-            await workspaces.attachAgent(database.context, second.workspace.id, "agent-one");
-            const firstDetached = await requiredWorkspace(
-                workspaces,
-                database.context,
-                first.workspace.id,
-            );
-            const secondWorkspaceAttached = await requiredWorkspace(
-                workspaces,
-                database.context,
-                second.workspace.id,
-            );
+            await expect(
+                workspaces.attachAgent(database.context, second.workspace.id, "agent-one"),
+            ).rejects.toThrow(/already attached to workspace/);
 
             expect(events.map((event) => event.type)).toEqual([
                 "workspace_created",
@@ -119,28 +111,21 @@ describe("workspace lifecycle event versions", () => {
                 "workspace_agent_attached",
                 "workspace_agent_attached",
                 "workspace_agent_reordered",
-                "workspace_agent_detached",
-                "workspace_agent_attached",
             ]);
             expectWorkspaceUpdateChain(events[2]!, first.workspace, firstAttached);
             expectWorkspaceUpdateChain(events[3]!, firstAttached, secondAttached);
             expectWorkspaceUpdateChain(events[4]!, secondAttached, reordered);
-            expectWorkspaceUpdateChain(events[5]!, reordered, firstDetached);
-            expectWorkspaceUpdateChain(events[6]!, second.workspace, secondWorkspaceAttached);
 
             const restarted = new WorkspacesModule(config, projects, git);
-            expect(await restarted.get(database.context, first.workspace.id)).toEqual(
-                firstDetached,
-            );
+            expect(await restarted.get(database.context, first.workspace.id)).toEqual(reordered);
             expect(await restarted.get(database.context, second.workspace.id)).toEqual(
-                secondWorkspaceAttached,
+                second.workspace,
             );
             expect(await restarted.listAgentIds(database.context, first.workspace.id)).toEqual([
                 "agent-two",
-            ]);
-            expect(await restarted.listAgentIds(database.context, second.workspace.id)).toEqual([
                 "agent-one",
             ]);
+            expect(await restarted.listAgentIds(database.context, second.workspace.id)).toEqual([]);
         } finally {
             database.close();
         }

@@ -50,11 +50,6 @@ export { type GitWorkingTreeFiles } from "./listGitWorkingTreeFiles.js";
 export { type UntrackedFileCount } from "./countUntrackedFileLines.js";
 export { type HostingRepository } from "./parseHostingRepository.js";
 export {
-    WorkspaceTransferTargetRestoreError,
-    type PreparedWorkspaceTransfer,
-    type WorkspaceTransferState,
-} from "./prepareWorkspaceTransfer.js";
-export {
     type GitAuthentication,
     type GitCommandAuthentication,
     type GitCommandAuthenticationLease,

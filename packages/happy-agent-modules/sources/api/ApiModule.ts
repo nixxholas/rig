@@ -847,7 +847,6 @@ export class ApiModule implements AgentModule {
     }
 
     async #convertWorkspaceEvent(ctx: Context, event: WorkspaceEvent): Promise<void> {
-        if (event.type === "workspace_transfer_scheduled") return;
         const resource: Record<string, unknown> = {
             ...workspaceResource(event.workspace),
             agents: await this.#agentsForWorkspace(ctx, event.workspace.id),
@@ -859,7 +858,6 @@ export class ApiModule implements AgentModule {
         const previous = workspaceResource(event.previousWorkspace);
         const changes =
             event.type === "workspace_agent_attached" ||
-            event.type === "workspace_agent_detached" ||
             event.type === "workspace_agent_reordered" ||
             event.type === "workspace_agent_visibility_changed"
                 ? {

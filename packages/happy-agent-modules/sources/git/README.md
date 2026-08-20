@@ -1,9 +1,9 @@
 # Git
 
 Everything the product does with a repository. `GitModule` reads facts and change snapshots, probes
-a folder, clones a remote, cuts and retires worktrees, renames branches, transfers a workspace,
-brokers repository credentials, and watches repositories for change. It has no database, no
-migrations, no tools, and no protocol or HTTP coupling.
+a folder, clones a remote, cuts and retires worktrees, renames branches, brokers repository
+credentials, and watches repositories for change. It has no database, no migrations, no tools, and
+no protocol or HTTP coupling.
 
 ```ts
 const git = new GitModule();
@@ -34,7 +34,7 @@ collection still works — it takes a lifetime of its own.
   `isWorktreeAt`, `defaultBranch`, `selectRemoteUrl`, `resolveCommit`, `resolveComparisonBase`,
   `readFileAtRevision`, `listWorkingTreeFiles`, `countUntrackedFileLines`.
 - **Changing a repository.** `clone`, `resolveWorkspaceBase`, `createWorktree`, `removeWorktree`,
-  `renameBranch`, `prepareWorkspaceTransfer`.
+  `renameBranch`.
 - **Credentials.** `registerCredential`, `commandAuthentication`, `daemonAuthentication`,
   `revokeCredentials`. A repository token never reaches Git: it stays in this process behind a
   loopback proxy that serves only the repository it was registered for. Any method that touches a

@@ -151,21 +151,6 @@ export {
     type WorkspaceDetailResult,
 } from "./WorkspaceDetailPage.js";
 export {
-    workspaceProjectTransferInputSchema,
-    workspaceSessionTransferInputSchema,
-    workspaceSessionTransferToolInputSchema,
-    workspaceTransferInputSchema,
-    workspaceTransferResultSchema,
-    workspaceTransferStoreResultSchema,
-    workspaceTransferWorkspaceSchema,
-    type WorkspaceProjectTransferInput,
-    type WorkspaceSessionTransferInput,
-    type WorkspaceTransferInput,
-    type WorkspaceTransferResult,
-    type WorkspaceTransferStoreResult,
-    type WorkspaceTransferWorkspace,
-} from "./WorkspaceTransfer.js";
-export {
     MAX_WORKSPACE_OUTPUT_CHARACTERS,
     WORKSPACE_PAGE_SIZE,
     WorkspacesModule,
@@ -194,7 +179,6 @@ export {
     assertWorkspacePage,
     assertWorkspaceStore,
     assertWorkspaceTransactionChange,
-    assertWorkspaceTransferResult,
     createWorkspaceStore,
     orderKeyBetween,
     workspaceMigrations,
@@ -239,4 +223,3 @@ export {
 } from "./tools/get_workspace.js";
 export { listWorkspacesTool } from "./tools/list_workspaces.js";
 export { renameWorkspaceTool } from "./tools/rename_workspace.js";
-export { transferWorkspaceTool } from "./tools/transfer_workspace.js";

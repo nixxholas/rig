@@ -11,7 +11,6 @@ import {
     type AnyAgentTool,
 } from "@slopus/happy-agent-base";
 import { createId } from "@paralleldrive/cuid2";
-import { type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import {
     afterCommit,
@@ -25,10 +24,8 @@ import {
 import { ConfigModule } from "../config/index.js";
 import {
     GitModule,
-    WorkspaceTransferTargetRestoreError,
     type GitCredentialRef,
     type GitRepositoryFacts,
-    type PreparedWorkspaceTransfer,
 } from "../git/index.js";
 import { ProjectRegistrationError, ProjectsModule, type Project } from "../projects/index.js";
 
@@ -135,15 +132,6 @@ import {
     type WorkspaceDetailQuery,
 } from "./WorkspaceDetailPage.js";
 import {
-    workspaceTransferInputSchema,
-    workspaceTransferResultSchema,
-    workspaceTransferStoreResultSchema,
-    type WorkspaceProjectTransferInput,
-    type WorkspaceSessionTransferInput,
-    type WorkspaceTransferInput,
-    type WorkspaceTransferResult,
-} from "./WorkspaceTransfer.js";
-import {
     assertWorkspace,
     assertWorkspaceBranchMetadata,
     assertWorkspaceList,
@@ -153,7 +141,6 @@ import {
     type WorkspaceMutationRequest,
     type WorkspaceMutationResult,
     type WorkspaceStore,
-    type WorkspaceTransactionChange,
 } from "./WorkspaceStore.js";
 import { requirePromise } from "./workspaceRuntime.js";
 import { archiveWorkspaceTool } from "./tools/archive_workspace.js";
@@ -162,12 +149,11 @@ import { getBranchMetadataTool } from "./tools/get_branch_metadata.js";
 import { getWorkspaceTool } from "./tools/get_workspace.js";
 import { listWorkspacesTool } from "./tools/list_workspaces.js";
 import { renameWorkspaceTool } from "./tools/rename_workspace.js";
-import { transferWorkspaceTool } from "./tools/transfer_workspace.js";
 import {
     insertWorkspaceAgent,
-    moveWorkspaceAgent,
     readWorkspaceAgent,
     readWorkspaceAgents,
+    updateWorkspaceAgentOrder,
 } from "./store/workspaceAgents.js";
 import { orderKeyBetween } from "./store/workspaceOrdering.js";
 import {
@@ -220,7 +206,7 @@ export class WorkspacesModule implements AgentModule {
     readonly #syncTimers = new Map<string, NodeJS.Timeout>();
     readonly #tasks = new Set<Promise<void>>();
     readonly #workspaceLocks: MapAsyncLock<string> = mapAsyncLock();
-    /** An agent lock serializes relocation; owner locks serialize each affected resource version. */
+    /** Agent and owner locks serialize permanent attachment and ordering changes. */
     readonly #agentAssociationLocks: MapAsyncLock<string> = mapAsyncLock();
     readonly #workspacesDirectory: string;
 
@@ -278,7 +264,6 @@ export class WorkspacesModule implements AgentModule {
                 listWorkspacesTool(this, scope.agent.id),
                 getWorkspaceTool(this, scope.agent.id),
                 renameWorkspaceTool(this, scope.agent.id),
-                transferWorkspaceTool(this, scope.agent.id),
                 archiveWorkspaceTool(this, scope.agent.id),
                 getBranchMetadataTool(this, scope.agent.id),
             ];
@@ -1492,93 +1477,6 @@ export class WorkspacesModule implements AgentModule {
         };
     }
 
-    // --- Moving a session between workspaces -------------------------------------------------
-
-    async validateSessionTransfer(
-        ctx: Context,
-        projectId: string,
-        sourceWorkspaceId: string,
-        targetWorkspaceId: string,
-    ): Promise<{ source: Workspace; target: Workspace }> {
-        if (sourceWorkspaceId === targetWorkspaceId) {
-            throw new Error("Choose a different workspace to move the session into.");
-        }
-        const source = await this.#ownedWorkspace(ctx, projectId, sourceWorkspaceId);
-        if (source === undefined) {
-            throw new Error("The session's current workspace was not found.");
-        }
-        if (
-            source.status !== "ready" ||
-            source.presence !== "present" ||
-            !existsSync(source.path)
-        ) {
-            throw new Error("The session's current workspace is not ready and available.");
-        }
-        const target = await this.#ownedWorkspace(ctx, projectId, targetWorkspaceId);
-        if (target === undefined) {
-            throw new Error("The workspace to move into was not found in this project.");
-        }
-        if (target.status !== "ready" || target.presence !== "present") {
-            throw new Error("The workspace to move into must be ready and available.");
-        }
-        return { source, target };
-    }
-
-    async prepareSessionTransfer(
-        ctx: Context,
-        projectId: string,
-        sourceWorkspaceId: string,
-        targetWorkspaceId: string,
-        beforeApply?: () => void | Promise<void>,
-    ): Promise<{ prepared: PreparedWorkspaceTransfer; target: Workspace }> {
-        const { source, target } = await this.validateSessionTransfer(
-            ctx,
-            projectId,
-            sourceWorkspaceId,
-            targetWorkspaceId,
-        );
-        try {
-            return {
-                prepared: await this.#git.prepareWorkspaceTransfer({
-                    ...(beforeApply === undefined ? {} : { beforeApply }),
-                    ...this.#gitOptions(projectId),
-                    sourcePath: source.path,
-                    targetPath: target.path,
-                }),
-                target,
-            };
-        } catch (error) {
-            if (!(error instanceof WorkspaceTransferTargetRestoreError)) throw error;
-            throw await this.markSessionTransferTargetFailed(
-                ctx,
-                projectId,
-                targetWorkspaceId,
-                error,
-            );
-        }
-    }
-
-    /** A workspace left in an unknown state by a failed transfer is not offered again. */
-    async markSessionTransferTargetFailed(
-        ctx: Context,
-        projectId: string,
-        targetWorkspaceId: string,
-        error: WorkspaceTransferTargetRestoreError,
-    ): Promise<WorkspaceTransferTargetRestoreError> {
-        const target = await this.#ownedWorkspace(ctx, projectId, targetWorkspaceId);
-        if (target === undefined) return error;
-        const failure = new WorkspaceTransferTargetRestoreError(
-            error.originalError,
-            error.restoreError,
-            target.name,
-        );
-        await this.markFailed(ctx, {
-            workspaceId: targetWorkspaceId,
-            error: boundedWorkspaceError(failure.message),
-        });
-        return failure;
-    }
-
     // --- Internals ---------------------------------------------------------------------------
 
     /** Every workspace this agent can see, archived ones included. */
@@ -1807,10 +1705,7 @@ export class WorkspacesModule implements AgentModule {
         return structuredClone(raw);
     }
 
-    /**
-     * Places an agent in one workspace. An agent has one durable workspace at a time; attaching it
-     * elsewhere moves that association without changing either workspace's folder or lifecycle.
-     */
+    /** Permanently places an agent in one workspace. Repeating the same attachment is idempotent. */
     async attachAgent(
         ctx: Context,
         workspaceId: string,
@@ -1837,9 +1732,14 @@ export class WorkspacesModule implements AgentModule {
             `agent:${input.agentId}`,
             async (agentCtx) => {
                 const existing = await readWorkspaceAgent(agentCtx.db, input.agentId);
+                if (existing !== undefined && existing.workspaceId !== input.workspaceId) {
+                    throw new Error(
+                        `Agent "${input.agentId}" is already attached to workspace "${existing.workspaceId}".`,
+                    );
+                }
                 return await this.#withWorkspaceAgentOwnerLocks(
                     agentCtx,
-                    [input.workspaceId, ...(existing === undefined ? [] : [existing.workspaceId])],
+                    [input.workspaceId],
                     async (lockCtx) =>
                         await lockCtx.inTx(async (txCtx) => {
                             const targetBefore = await this.#requireAgentWorkspace(
@@ -1850,44 +1750,24 @@ export class WorkspacesModule implements AgentModule {
                             if (current?.workspaceId === input.workspaceId) {
                                 return structuredClone(current);
                             }
-                            const sourceBefore =
-                                current === undefined
-                                    ? undefined
-                                    : await this.#requireAgentWorkspace(txCtx, current.workspaceId);
+                            if (current !== undefined) {
+                                throw new Error(
+                                    `Agent "${input.agentId}" is already attached to workspace "${current.workspaceId}".`,
+                                );
+                            }
                             const siblings = await readWorkspaceAgents(txCtx.db, input.workspaceId);
                             const association: WorkspaceAgentAssociation = {
                                 workspaceId: input.workspaceId,
                                 agentId: input.agentId,
                                 orderKey: orderKeyBetween(siblings.at(-1)?.orderKey ?? null, null),
                             };
-                            if (current === undefined) {
-                                await insertWorkspaceAgent(txCtx.db, association);
-                            } else {
-                                await moveWorkspaceAgent(txCtx.db, association);
-                            }
-
-                            if (sourceBefore !== undefined) {
-                                const sourceAfter = await touchWorkspace(txCtx.db, sourceBefore);
-                                await this.#mutations.observe(
-                                    txCtx,
-                                    this.#mutations.newEvent({
-                                        type: "workspace_agent_detached",
-                                        agentId: input.agentId,
-                                        nextWorkspaceId: input.workspaceId,
-                                        workspace: sourceAfter,
-                                        previousWorkspace: sourceBefore,
-                                    }),
-                                );
-                            }
+                            await insertWorkspaceAgent(txCtx.db, association);
                             const targetAfter = await touchWorkspace(txCtx.db, targetBefore);
                             await this.#mutations.observe(
                                 txCtx,
                                 this.#mutations.newEvent({
                                     type: "workspace_agent_attached",
                                     association,
-                                    ...(sourceBefore === undefined
-                                        ? {}
-                                        : { previousWorkspaceId: sourceBefore.id }),
                                     workspace: targetAfter,
                                     previousWorkspace: targetBefore,
                                 }),
@@ -1986,7 +1866,12 @@ export class WorkspacesModule implements AgentModule {
                             );
                             if (current.orderKey === orderKey) return structuredClone(current);
                             const reordered = { ...current, orderKey };
-                            await moveWorkspaceAgent(txCtx.db, reordered);
+                            await updateWorkspaceAgentOrder(
+                                txCtx.db,
+                                input.workspaceId,
+                                input.agentId,
+                                orderKey,
+                            );
                             const workspaceAfter = await touchWorkspace(txCtx.db, workspaceBefore);
                             await this.#mutations.observe(
                                 txCtx,
@@ -2153,54 +2038,6 @@ export class WorkspacesModule implements AgentModule {
             },
             MAX_WORKSPACE_OUTPUT_CHARACTERS,
         );
-    }
-
-    async transfer(ctx: Context, input: WorkspaceTransferInput): Promise<WorkspaceTransferResult> {
-        this.#assertEnabled();
-        this.#assertInput(workspaceTransferInputSchema, input, "workspace transfer");
-        const normalized = structuredClone(input);
-        const request = stripOperationId(normalized);
-        const operationId = normalized.operationId ?? this.#newIdentity(workspaceOperationIdSchema);
-        const mutationRequest: WorkspaceMutationRequest = { operation: "transfer", operationId };
-        const subjectId =
-            "workspaceId" in request ? request.workspaceId : request.targetWorkspaceId;
-
-        const change = await this.#mutations.runTransaction(ctx, async (txCtx) => {
-            const before = await this.#mutations.getRequired(txCtx, subjectId);
-            const raw = await requirePromise(
-                this.#store.transfer(txCtx, structuredClone(request), mutationRequest),
-                "Workspace store transfer",
-            );
-            const result = normalizeTransferStoreResult(raw, operationId);
-            if (result.operationId !== operationId) {
-                throw new Error("Workspace transfer result identity does not match the request.");
-            }
-            assertTransferRequestResult(result, request);
-            const after = await this.#mutations.getRequired(txCtx, subjectId);
-            if ("workspaceId" in request && after.projectRef !== request.targetProjectRef) {
-                throw new Error(
-                    "Workspace project transfer did not reach the requested project reference.",
-                );
-            }
-            if (!result.changed) return { result };
-            const event =
-                result.state === "scheduled"
-                    ? this.#mutations.newEvent({
-                          type: "workspace_transfer_scheduled",
-                          targetWorkspaceId: result.targetWorkspaceId,
-                      })
-                    : this.#mutations.newEvent({
-                          type: "workspace_transferred",
-                          workspace: after,
-                          previousWorkspace: before,
-                          ...("workspaceId" in request
-                              ? { previousProjectRef: before.projectRef }
-                              : {}),
-                      });
-            await this.#mutations.observe(txCtx, event);
-            return { result, event };
-        });
-        return structuredClone(requireTransferFromResult(change.result));
     }
 
     async branchMetadata(ctx: Context, workspaceId: string): Promise<WorkspaceBranchMetadata> {
@@ -2511,75 +2348,6 @@ export class WorkspacesModule implements AgentModule {
             throw new Error("Workspace page cursor must advance exactly by visible records.");
         }
     }
-}
-
-function stripOperationId(
-    input: WorkspaceTransferInput,
-): WorkspaceSessionTransferInput | WorkspaceProjectTransferInput {
-    if ("targetWorkspaceId" in input) {
-        return { targetWorkspaceId: input.targetWorkspaceId };
-    }
-    return { workspaceId: input.workspaceId, targetProjectRef: input.targetProjectRef };
-}
-
-function assertTransferRequestResult(
-    result: WorkspaceTransferResult,
-    request: WorkspaceSessionTransferInput | WorkspaceProjectTransferInput,
-): void {
-    if ("targetWorkspaceId" in request) {
-        if (
-            result.state === "scheduled" &&
-            result.targetWorkspaceId !== request.targetWorkspaceId
-        ) {
-            throw new Error("Workspace scheduled transfer target does not match the request.");
-        }
-        if (result.state === "transferred" && result.workspace.id !== request.targetWorkspaceId) {
-            throw new Error(
-                "Workspace session transfer result does not match the requested workspace.",
-            );
-        }
-        return;
-    }
-    if (result.state !== "transferred") {
-        throw new Error("Workspace project transfer must return a transferred result.");
-    }
-    if (result.workspace.id !== request.workspaceId) {
-        throw new Error("Workspace project transfer changed the workspace identity.");
-    }
-    if (result.workspace.projectRef !== request.targetProjectRef) {
-        throw new Error(
-            "Workspace project transfer result does not match the requested project reference.",
-        );
-    }
-}
-
-function normalizeTransferStoreResult(
-    raw: Static<typeof workspaceTransferStoreResultSchema>,
-    operationId: string,
-): WorkspaceTransferResult {
-    if (Value.Check(workspaceTransferResultSchema, raw)) return structuredClone(raw);
-    assertWorkspace(raw);
-    assertWorkspaceRecord(raw);
-    return {
-        operationId,
-        changed: true,
-        state: "transferred",
-        targetWorkspaceId: raw.id,
-        workspace: {
-            id: raw.id,
-            projectRef: raw.projectRef,
-            path: raw.path,
-        },
-    };
-}
-
-function requireTransferFromResult(
-    result: WorkspaceTransactionChange["result"],
-): WorkspaceTransferResult {
-    if (!Value.Check(workspaceTransferResultSchema, result)) {
-        throw new Error("Workspace transfer did not return a valid transfer result.");
-    }
-    return result;
 }
 
 function requirePreviousWorkspace(workspace: Workspace | undefined): Workspace {

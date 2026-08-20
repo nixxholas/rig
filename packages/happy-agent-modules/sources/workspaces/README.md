@@ -5,8 +5,8 @@ lifecycle that says whether it is usable yet. The module owns that catalog and i
 Agent Base database, it owns the _decisions_ — which name, which branch, which folder key, which
 status — and it does the Git and filesystem work those decisions imply. Cutting the worktree,
 copying the folder, running the setup commands, replicating the shared files, renaming the branch,
-moving an agent between workspaces and removing an archived folder are all this module's own work.
-There is no host object between the catalog and the disk.
+and removing an archived folder are all this module's own work. There is no host object between the
+catalog and the disk.
 
 The important consequence is ordering: the durable reservation happens **first**, and Git happens
 after. A workspace row exists, with a unique name, storage key, and branch, before anything touches
@@ -35,7 +35,7 @@ Three modules, and nothing else.
 | ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | [`ConfigModule`](../config/README.md)     | Where managed workspace folders live, whether managed workspaces are on at all, and what a workspace folder does by default — setup commands, sync paths, what is kept on archive. |
 | [`ProjectsModule`](../projects/README.md) | The project's folder, its credential, its repository lock, and the vocabulary a workspace names things with.                                                                       |
-| [`GitModule`](../git/README.md)           | Worktrees, branches, clones, transfers, and every path Git is handed.                                                                                                              |
+| [`GitModule`](../git/README.md)           | Worktrees, branches, clones, and every path Git is handed.                                                                                                                         |
 
 The dependency on projects is one-way. A workspace is a branch of a project's repository, in a
 folder under that project's key, cut from the trunk that project decided on, and every worktree of
@@ -56,10 +56,11 @@ that name is [titles](../titles/README.md): it asks, and then renames the worksp
 `inheritName`. What a folder and a branch are called is this catalog's to write down and nobody
 else's, but what they should be called is not a question it asks.
 
-The catalog records agent placement separately from workspace lifecycle: an agent belongs to at most
-one workspace and its `orderKey` orders it among that workspace's agents. Agent identity and
-lifecycle remain in Agent Base. Identities are `crypto.randomUUID()` and time is `Date.now()`, both
-the module's own.
+The catalog records agent placement separately from workspace lifecycle: an agent's workspace is
+permanent, and its `orderKey` orders it among that workspace's agents. Repeating the original
+attachment is idempotent; attaching the same agent to another workspace is refused. Agent identity
+and lifecycle remain in Agent Base. Identities are `crypto.randomUUID()` and time is `Date.now()`,
+both the module's own.
 `WORKSPACE_PAGE_SIZE` (50) and `MAX_WORKSPACE_OUTPUT_CHARACTERS` (12,000) bound paging and
 model-facing text. `onEventTransactional(listener)` and `onEvent(listener)` take a subscriber and
 return the call that ends the subscription. When the module's own folder removal or branch rename
@@ -130,9 +131,6 @@ person who archived a workspace does not get it handed back because a folder wou
   workspaces are history and are left out unless `includeArchived` is passed.
 - **`get_workspace`** — `{ workspaceId, cursor?, limit? }`. One workspace rendered as a bounded
   detail string, paged so a small output budget cannot silently drop identity or lifecycle fields.
-- **`transfer_workspace`** — `{ targetWorkspaceId }`. Moves the current agent/session into an
-  existing workspace. The result says whether the move happened (`transferred`) or was deferred
-  (`scheduled`).
 - **`archive_workspace`** — `{ workspaceId }`. Archives one workspace, with the two-step semantics
   above.
 - **`get_workspace_branch_metadata`** — `{ workspaceId, cursor?, limit? }`. The workspace's branch as
@@ -143,16 +141,14 @@ There is deliberately no model tool for `recordInitialization`, `markReady`, `ma
 `completeArchive`, `applyGitFacts`, or `applyProbe`. Those are lifecycle transitions driven by what
 Git actually did; a model guessing at them would be inventing state.
 
-Governing principles across all seven tools:
+Governing principles across all six tools:
 
-- Read, create, and rename tools use `shouldReviewInAutoMode: () => false`. Archive and transfer use
-  `shouldReviewInAutoMode: () => true` and disclose their destructive filesystem effects to the Auto
-  reviewer. Neither declares `shouldRunInFullAccessInAutoMode`; review does not grant unsandboxed
-  execution.
+- Read, create, and rename tools use `shouldReviewInAutoMode: () => false`. Archive uses
+  `shouldReviewInAutoMode: () => true` and discloses its destructive filesystem effects to the Auto
+  reviewer. It does not declare `shouldRunInFullAccessInAutoMode`; review does not grant
+  unsandboxed execution.
 - `create_workspace`, `rename_workspace`, and `archive_workspace` are durable transactional tools.
-  `transfer_workspace` is non-durable because it moves files on disk and that external effect cannot
-  be committed atomically. The three read tools are non-durable because a current read does not need
-  replay.
+  The three read tools are non-durable because a current read does not need replay.
 - Every result the store returns is re-validated against its schema and cross-checked against a
   fresh authoritative read before it is trusted. The store's `changed` flag must agree with an
   actual before/after comparison, and a changed row must have advanced its `version`; a mismatch
@@ -187,8 +183,6 @@ Building a workspace:
   arrived at. A workspace someone has already named keeps that name: only a placeholder is replaced.
 - `resolvePath`, `resolveSessionOwnership` — what owns a directory, and the explicit durable owner of
   a new session. Both answer with a `ResolvedProjectOwnership`.
-- `validateSessionTransfer`, `prepareSessionTransfer`, `markSessionTransferTargetFailed` — moving a
-  session's files from one workspace into another.
 - `reconcileGitFacts(ctx, agentId)` and
   `recordGitFacts(ctx, agentId, workspaceId, facts)` — re-derive presence and Git facts, and persist
   what a live scan observed.
@@ -231,8 +225,6 @@ Reading:
 - `get(ctx, agentId, workspaceId)`, `getByPath(ctx, agentId, path)`, and
   `getPage(ctx, agentId, workspaceId, query?)` — `getPage` returns `{ workspace: null }` for an
   unknown ID instead of throwing.
-- `transfer(ctx, agentId, input)` — also accepts a project-transfer shape
-  (`{ workspaceId, targetProjectRef, operationId? }`) that the model tool does not expose.
 - `branchMetadata` and `branchMetadataPage`.
 - `formatForModel`, `formatPageForModel`, `formatDetailPageForModel`,
   `formatWorkspaceOperationForModel`, `formatWorkspaceForModel`,
@@ -254,13 +246,14 @@ keys and branches.
 
 Every changed mutation emits a `WorkspaceEvent`: `workspace_created`, `workspace_updated` (carrying
 a `change` naming the transition), `workspace_renamed`, `workspace_reordered` (with
-`previousOrderKey`), `workspace_transferred`, `workspace_archived`, or
-`workspace_transfer_scheduled`. Each carries `eventId`, `at`, `agentId`, and the resulting
-workspace. A subscriber taken by `onEventTransactional(listener)` runs inside the same store
-transaction as the mutation, so a subscriber that throws rolls the mutation back with it. A
-subscriber taken by `onEvent(listener)` runs only after that transaction has durably committed,
-receiving the identical frozen event object; a failure there is logged and reaches nobody else — it
-never fails the mutation that already happened. Both return the call that ends the subscription.
+`previousOrderKey`), `workspace_archived`, `workspace_agent_attached`,
+`workspace_agent_reordered`, or `workspace_agent_visibility_changed`. Each carries `eventId`, `at`,
+and the resulting workspace. A subscriber taken by `onEventTransactional(listener)` runs inside the
+same store transaction as the mutation, so a subscriber that throws rolls the mutation back with
+it. A subscriber taken by `onEvent(listener)` runs only after that transaction has durably
+committed, receiving the identical frozen event object; a failure there is logged and reaches
+nobody else — it never fails the mutation that already happened. Both return the call that ends the
+subscription.
 
 ## Storage
 
