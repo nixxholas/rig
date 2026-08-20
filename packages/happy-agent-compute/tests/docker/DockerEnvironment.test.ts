@@ -167,10 +167,11 @@ describe("DockerEnvironment", () => {
         expect((attached.exec as ReturnType<typeof vi.fn>).mock.calls[0]?.[0].Cmd).toEqual([
             "/bin/sh",
             "-c",
-            expect.stringContaining("--policy-fd 3"),
+            expect.stringContaining('--policy "$3"'),
             "happy-agent-supervisor-check",
             DOCKER_SUPERVISOR_PATH,
             "amd64",
+            '{"mode":"full_access","network":{"egress":true,"localBinding":true}}',
         ]);
     });
 

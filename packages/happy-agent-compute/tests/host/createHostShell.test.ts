@@ -1,4 +1,4 @@
-import { access, mkdir, mkdtemp, rm, symlink } from "node:fs/promises";
+import { access, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -197,7 +197,7 @@ describe("createHostShell commands", () => {
         expect(callerPermissions.mode).toBe("read_only");
     });
 
-    it("invokes the native supervisor with an allowed-host policy", async () => {
+    it("passes the native supervisor policy as an ordinary argument", async () => {
         const cwd = await makeWorkspace();
         const policies: unknown[] = [];
         const run = vi.fn(async (_ctx: Context, options: ProcessRunOptions) => {
@@ -232,9 +232,18 @@ describe("createHostShell commands", () => {
             }),
         ]);
         expect(run.mock.calls[0]?.[1]).toMatchObject({
-            command: expect.stringContaining("happy-agent-supervisor"),
-            args: expect.arrayContaining(["--policy-fd", "3"]),
+            command: resolveSupervisorBinary(),
+            args: [
+                "--policy",
+                expect.any(String),
+                "--",
+                expect.any(String),
+                "-lc",
+                expect.any(String),
+            ],
         });
+        expect(run.mock.calls[0]?.[1]).not.toHaveProperty("extraFileDescriptorInputs");
+        expect(run.mock.calls[0]?.[1].initialStdin).toBeUndefined();
         expect(run).toHaveBeenCalledOnce();
     });
 
@@ -281,7 +290,7 @@ describe("createHostShell commands", () => {
         await expect(access(outside)).rejects.toMatchObject({ code: "ENOENT" });
     });
 
-    it("uses the stdin handshake only for a restricted pseudo-terminal", async () => {
+    it("passes the same argv policy to a restricted pseudo-terminal", async () => {
         const cwd = await makeWorkspace();
         const run = vi.fn(async (_ctx: Context, options: ProcessRunOptions) =>
             completedProcessResult(options),
@@ -300,15 +309,20 @@ describe("createHostShell commands", () => {
         });
 
         expect(run.mock.calls[0]?.[1]).toMatchObject({
-            command: "/bin/sh",
-            initialStdin: expect.any(String),
-            initialStdinHandshake: {
-                completeMarker: expect.any(String),
-                readyMarker: expect.any(String),
-            },
+            command: resolveSupervisorBinary(),
+            args: [
+                "--policy",
+                expect.any(String),
+                "--",
+                expect.any(String),
+                "-lc",
+                expect.stringContaining("true"),
+            ],
             tty: true,
         });
-        expect(run.mock.calls[0]?.[1].extraFileDescriptorInputs).toBeUndefined();
+        expect(run.mock.calls[0]?.[1]).not.toHaveProperty("extraFileDescriptorInputs");
+        expect(run.mock.calls[0]?.[1].initialStdin).toBeUndefined();
+        expect(run.mock.calls[0]?.[1]).not.toHaveProperty("initialStdinHandshake");
     });
 
     it("lets the native supervisor own unrestricted egress and local-binding denial", async () => {
@@ -447,6 +461,33 @@ describe("createHostShell commands", () => {
         await expect(access(policyPath)).rejects.toMatchObject({ code: "ENOENT" });
     });
 
+    it.runIf(process.platform === "darwin")(
+        "does not install a host protected-path watcher on macOS",
+        async () => {
+            const cwd = await makeWorkspace();
+            const policyPath = join(cwd, "agent-policy.toml");
+            const run = vi.fn(async (_ctx: Context, options: ProcessRunOptions) => {
+                await writeFile(policyPath, "created outside the fake supervisor");
+                return completedProcessResult(options);
+            });
+            const shell = createHostShell({
+                ctx,
+                cwd,
+                hostPolicy: { protectedProjectFiles: ["agent-policy.toml"] },
+                processManager: { run } as unknown as NativeProcessManager,
+            });
+            shells.push(shell);
+
+            await expect(
+                shell.run({
+                    command: "true",
+                    permissions: computePermissions("workspace_write"),
+                }),
+            ).resolves.toMatchObject({ exitCode: 0 });
+            await expect(access(policyPath)).resolves.toBeUndefined();
+        },
+    );
+
     it("rejects symlinked denied-write paths before starting a restricted command", async () => {
         const cwd = await makeWorkspace();
         const target = join(cwd, "..", "protected-target");
@@ -508,9 +549,11 @@ async function makeWorkspace(): Promise<string> {
 }
 
 function readSupervisorPolicy(options: ProcessRunOptions): unknown {
-    const input = options.extraFileDescriptorInputs?.[0] ?? options.initialStdin;
+    const policyIndex = options.args?.indexOf("--policy") ?? -1;
+    expect(policyIndex).toBeGreaterThanOrEqual(0);
+    const input = options.args?.[policyIndex + 1];
     expect(input).toBeTypeOf("string");
-    return JSON.parse(String(input).trim());
+    return JSON.parse(String(input));
 }
 
 function shellQuote(value: string): string {

@@ -361,7 +361,6 @@ export function createDockerShell(
             throw error;
         }
         let invokedCommand: string[];
-        let supervisorInitialStdin = "";
         try {
             if (supervisorPolicy === undefined) {
                 invokedCommand = [shell, "-lc", runOptions.command];
@@ -373,7 +372,6 @@ export function createDockerShell(
                     ...(supervisorPath === undefined ? {} : { supervisorPath }),
                 });
                 invokedCommand = [supervisorCommand.command, ...supervisorCommand.args];
-                supervisorInitialStdin = supervisorCommand.initialStdin;
             }
         } catch (error) {
             await cleanupStartup();
@@ -441,7 +439,7 @@ export function createDockerShell(
         let stream!: Duplex;
         try {
             stream = await exec.start({ hijack: true, stdin: true, Tty: false });
-            stream.write(`${DOCKER_EXEC_START_GATE}${supervisorInitialStdin}`);
+            stream.write(DOCKER_EXEC_START_GATE);
         } catch (error) {
             stream?.end();
             await cleanupStartup();

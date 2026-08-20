@@ -205,9 +205,11 @@ fn access_rule(
         let root = seatbelt_string(root)?;
         let mut requirements = vec![format!("(subpath {root})")];
         for exclusion in exclusions {
+            let exclusion_regex = seatbelt_path_regex(exclusion)?;
             let exclusion = seatbelt_string(exclusion)?;
             requirements.push(format!("(require-not (literal {exclusion}))"));
             requirements.push(format!("(require-not (subpath {exclusion}))"));
+            requirements.push(format!(r##"(require-not (regex #"{exclusion_regex}"))"##));
         }
         matchers.push(format!("  (require-all {})", requirements.join(" ")));
     }
@@ -234,6 +236,25 @@ fn normalized_paths(paths: &[PathBuf]) -> SupervisorResult<Vec<PathBuf>> {
 }
 
 fn seatbelt_string(path: &Path) -> SupervisorResult<String> {
+    let path = seatbelt_path(path)?;
+    Ok(format!(
+        "\"{}\"",
+        path.replace('\\', "\\\\").replace('"', "\\\"")
+    ))
+}
+
+fn seatbelt_path_regex(path: &Path) -> SupervisorResult<String> {
+    let path = seatbelt_path(path)?;
+    let path = path.trim_end_matches('/');
+    let escaped = regex_lite::escape(if path.is_empty() { "/" } else { path }).replace('"', "\\\"");
+    if path.is_empty() || path == "/" {
+        Ok(format!(r"^{escaped}.*$"))
+    } else {
+        Ok(format!(r"^{escaped}(/.*)?$"))
+    }
+}
+
+fn seatbelt_path(path: &Path) -> SupervisorResult<&str> {
     let path = path.to_str().ok_or_else(|| {
         invalid_input(format!(
             "Seatbelt path is not valid UTF-8: {}",
@@ -247,10 +268,7 @@ fn seatbelt_string(path: &Path) -> SupervisorResult<String> {
         ))
         .into());
     }
-    Ok(format!(
-        "\"{}\"",
-        path.replace('\\', "\\\\").replace('"', "\\\"")
-    ))
+    Ok(path)
 }
 
 #[cfg(test)]
@@ -275,6 +293,7 @@ mod tests {
         assert!(profile.contains("(allow network-outbound (remote ip \"*:*\")"));
         assert!(!profile.contains("sh -"));
         assert!(profile.contains("\\\"quoted\\\""));
+        assert!(profile.contains(r##"(regex #"^/workspace/"##));
     }
 
     #[test]

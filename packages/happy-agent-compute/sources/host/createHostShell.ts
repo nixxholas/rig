@@ -30,11 +30,8 @@ import { quoteShellArgument } from "../sandbox/impl/quoteShellArgument.js";
 import { resolvePotentialPath } from "../sandbox/impl/resolvePotentialPath.js";
 import { resolveSupervisorProtectedPaths } from "../supervisor/resolveSupervisorProtectedPaths.js";
 import {
-    createDirectSupervisorCommand,
     createSupervisorCommand,
     createSupervisorPolicy,
-    type DirectSupervisorCommand,
-    type SupervisorCommand,
 } from "../supervisor/index.js";
 import {
     createProtectedPathMonitor,
@@ -72,11 +69,9 @@ export interface HostShellOptions {
 interface PreparedHostCommand {
     args?: readonly string[];
     command: string;
-    directSupervisorCommand?: DirectSupervisorCommand;
     processCwd?: string;
     protectedCreatePaths?: readonly string[];
     shell?: string;
-    supervisorCommand?: SupervisorCommand;
 }
 
 interface HostSession {
@@ -150,7 +145,6 @@ export function createHostShell(options: HostShellOptions): ComputeShell {
         command: string,
         cwd: string,
         shell: string,
-        tty: boolean,
     ): Promise<PreparedHostCommand> => {
         if (permissions.mode === "full_access") {
             return { command, shell };
@@ -214,23 +208,6 @@ export function createHostShell(options: HostShellOptions): ComputeShell {
                       ),
                   }),
         });
-        if (!tty) {
-            const directSupervisorCommand = createDirectSupervisorCommand({
-                command: withWorkingDirectory(command, cwd),
-                policy,
-                shell,
-                supervisorPath,
-            });
-            return {
-                args: directSupervisorCommand.args,
-                command: directSupervisorCommand.command,
-                directSupervisorCommand,
-                processCwd: canonicalCwd,
-                protectedCreatePaths: absoluteDeniedWritePaths.filter(
-                    (path) => !existsHostPath(options.cwd, path),
-                ),
-            };
-        }
         const supervisorCommand = createSupervisorCommand({
             command: withWorkingDirectory(command, cwd),
             policy,
@@ -244,7 +221,6 @@ export function createHostShell(options: HostShellOptions): ComputeShell {
             protectedCreatePaths: absoluteDeniedWritePaths.filter(
                 (path) => !existsHostPath(options.cwd, path),
             ),
-            supervisorCommand,
         };
     };
 
@@ -439,26 +415,12 @@ export function createHostShell(options: HostShellOptions): ComputeShell {
                 runOptions.command,
                 cwd,
                 shell,
-                runOptions.tty === true,
             );
             const commandEnvironment = toolEnvironment;
             const processRunOptions: ProcessRunOptions = {
                 command: preparedCommand.command,
                 cwd: preparedCommand.processCwd ?? cwd,
                 env: commandEnvironment,
-                ...(preparedCommand.supervisorCommand === undefined
-                    ? {}
-                    : {
-                          initialStdin: preparedCommand.supervisorCommand.initialStdin,
-                          initialStdinHandshake:
-                              preparedCommand.supervisorCommand.initialStdinHandshake,
-                      }),
-                ...(preparedCommand.directSupervisorCommand === undefined
-                    ? {}
-                    : {
-                          extraFileDescriptorInputs:
-                              preparedCommand.directSupervisorCommand.extraFileDescriptorInputs,
-                      }),
                 timeoutMs: runOptions.timeoutMs ?? DEFAULT_HOST_COMMAND_TIMEOUT_MS,
                 maxOutputBytes: runOptions.maxOutputBytes ?? DEFAULT_HOST_MAX_OUTPUT_BYTES,
                 ...(runOptions.tty === undefined ? {} : { tty: runOptions.tty }),
@@ -527,26 +489,12 @@ export function createHostShell(options: HostShellOptions): ComputeShell {
                     runOptions.command,
                     cwd,
                     shell,
-                    runOptions.tty === true,
                 );
                 const commandEnvironment = toolEnvironment;
                 const processStartOptions: ProcessStartOptions = {
                     command: preparedCommand.command,
                     cwd: preparedCommand.processCwd ?? cwd,
                     env: commandEnvironment,
-                    ...(preparedCommand.supervisorCommand === undefined
-                        ? {}
-                        : {
-                              initialStdin: preparedCommand.supervisorCommand.initialStdin,
-                              initialStdinHandshake:
-                                  preparedCommand.supervisorCommand.initialStdinHandshake,
-                          }),
-                    ...(preparedCommand.directSupervisorCommand === undefined
-                        ? {}
-                        : {
-                              extraFileDescriptorInputs:
-                                  preparedCommand.directSupervisorCommand.extraFileDescriptorInputs,
-                          }),
                     maxOutputBytes: runOptions.maxOutputBytes ?? DEFAULT_HOST_MAX_OUTPUT_BYTES,
                     ...(runOptions.tty === undefined ? {} : { tty: runOptions.tty }),
                 };

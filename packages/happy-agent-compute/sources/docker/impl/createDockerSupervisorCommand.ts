@@ -9,9 +9,8 @@ import {
 export const DOCKER_SUPERVISOR_PATH = "/tools/happy-agent-sandbox";
 
 /**
- * Creates the in-container command that sends one command-scoped policy over a private pipe to the
- * mounted native supervisor. The wrapper preserves the workload's stdin on a separate descriptor,
- * so no mutable policy file or process argument contains the policy.
+ * Creates the in-container command that gives one command-scoped policy to the mounted native
+ * supervisor as an ordinary argument, matching Codex's direct macOS Seatbelt invocation.
  */
 export function createDockerSupervisorCommand(options: {
     command: string;

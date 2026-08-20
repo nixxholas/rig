@@ -293,7 +293,7 @@ export class DockerEnvironment {
                 "path=$1",
                 "expected=$2",
                 '[ -x "$path" ] || exit 40',
-                'printf %s \'{"mode":"full_access","network":{"egress":true,"localBinding":true}}\' | "$path" --policy-fd 3 3<&0 -- /bin/sh -c "exit 0" >/dev/null 2>&1',
+                '"$path" --policy "$3" -- /bin/sh -c "exit 0" >/dev/null 2>&1',
                 "status=$?",
                 '[ "$status" -eq 0 ] || exit 41',
                 "machine=$(uname -m 2>/dev/null) || exit 42",
@@ -305,6 +305,7 @@ export class DockerEnvironment {
             "happy-agent-supervisor-check",
             DOCKER_SUPERVISOR_PATH,
             architecture,
+            '{"mode":"full_access","network":{"egress":true,"localBinding":true}}',
         ]);
         if (result.exitCode === 40) {
             throw new Error(

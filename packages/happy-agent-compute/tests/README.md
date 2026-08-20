@@ -74,7 +74,7 @@ Status meanings:
 | `createDockerBashContext.test.ts`               | `tests/docker/createDockerShell.test.ts`, Docker timeout live case   | Weaker; most session mechanics are ported, but Git broker, selected secrets, and permission-revision races are not applicable or not ported |
 | `createDockerFileSystemContext.test.ts`         | `tests/docker/createDockerFileSystem.test.ts`                        | Present at the fake-daemon boundary                                                                                                         |
 | `createDockerFileSystemContext.docker.test.ts`  | `tests/live/dockerBackend.live.test.ts`                              | Present and broader: a real daemon is used for containment, atomic `noFollow`, sessions, network, and disposal                              |
-| `createDockerSupervisorCommand.test.ts`         | `tests/docker/impl/createDockerSupervisorCommand.test.ts`            | Present; policy transport preserves stdin and avoids a mutable in-container policy file                                                     |
+| `createDockerSupervisorCommand.test.ts`         | `tests/docker/impl/createDockerSupervisorCommand.test.ts`            | Present; direct argv policy transport preserves workload stdin and avoids a mutable in-container policy file                                |
 | `formatDockerTouchTimestamp.test.ts`            | same-named Docker test                                               | Present                                                                                                                                     |
 | `loadDockerProjectManagedNetworkPolicy.test.ts` | same-named Docker test                                               | Present                                                                                                                                     |
 | `parseDockerPathStat.test.ts`                   | same-named Docker test                                               | Present                                                                                                                                     |
@@ -159,6 +159,8 @@ session, and terminal assertions, but the backend contracts should have a lower-
 - `deniedWritePaths` is enforced inside the workspace.
 - `allowedWritePaths` opens one real root outside the workspace.
 - A write denial beats both the workspace grant and an explicit grant.
+- macOS Seatbelt blocks first-time creation of a protected project path without a host watcher.
+- Fifty consecutive macOS restricted commands complete without a policy descriptor.
 - `deniedReadPaths` masks real content, including when the path is also granted.
 - Withheld egress blocks real `curl`.
 - Withheld local binding blocks a real Node listener in a restricted mode.

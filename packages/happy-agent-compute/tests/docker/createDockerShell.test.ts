@@ -325,12 +325,10 @@ describe("createDockerShell", () => {
     it("keeps an absent project policy reserved across shells sharing a container", async () => {
         const bookkeepingCommands: string[][] = [];
         const foregroundStreams: PassThrough[] = [];
-        const foregroundInputs: string[] = [];
         const container = createBookkeepingDockerContainer(
             bookkeepingCommands,
             foregroundStreams,
             false,
-            foregroundInputs,
         );
         const environment = {
             config: { container: "shared", workingDirectory: "/workspace" },
@@ -353,10 +351,13 @@ describe("createDockerShell", () => {
             permissions: computePermissions("workspace_write"),
         });
 
-        const firstPolicy = JSON.parse(foregroundInputs[0]!.split("\n")[1]!) as {
+        const foregroundCommands = bookkeepingCommands.filter(
+            (command) => command[3] === "compute-command",
+        );
+        const firstPolicy = readSupervisorPolicy(foregroundCommands[0]!) as {
             deniedWritePaths: string[];
         };
-        const secondPolicy = JSON.parse(foregroundInputs[1]!.split("\n")[1]!) as {
+        const secondPolicy = readSupervisorPolicy(foregroundCommands[1]!) as {
             deniedWritePaths: string[];
         };
         const sharedMarker = firstPolicy.deniedWritePaths.find((path) =>
@@ -492,7 +493,6 @@ function createBookkeepingDockerContainer(
     commands: string[][],
     foregroundStreams: PassThrough[] = [],
     autoEndForeground = true,
-    foregroundInputs: string[] = [],
 ): Dockerode.Container {
     return {
         async exec(options: { AttachStdin?: boolean; Cmd?: string[] }) {
@@ -500,11 +500,6 @@ function createBookkeepingDockerContainer(
             commands.push(command);
             const stream = new PassThrough();
             if (options.AttachStdin === true) {
-                const inputIndex = foregroundInputs.length;
-                foregroundInputs.push("");
-                stream.on("data", (chunk: Buffer) => {
-                    foregroundInputs[inputIndex] += chunk.toString("utf8");
-                });
                 foregroundStreams.push(stream);
             }
             const output =
@@ -541,4 +536,10 @@ function createBookkeepingDockerContainer(
             },
         },
     } as unknown as Dockerode.Container;
+}
+
+function readSupervisorPolicy(command: readonly string[]): unknown {
+    const policyIndex = command.indexOf("--policy");
+    expect(policyIndex).toBeGreaterThanOrEqual(0);
+    return JSON.parse(command[policyIndex + 1]!);
 }

@@ -171,11 +171,12 @@ are protected by the package on its own.
 ## Restricted execution
 
 `sources/supervisor/` translates one immutable `ComputePermissions` value into the native supervisor
-policy. The policy is sent over a private startup stream and never stored in a mutable policy file
-or process argument. The supervisor itself supplies filtered HTTP and SOCKS egress, so compute does
-not create a host/Docker proxy or socket bridge for protections the supervisor already owns.
-Existing project policy files are denied directly. Missing protected paths are never materialized;
-macOS denies them natively and compute's protected-path monitor remains the cross-platform backstop.
+policy. Like Codex's macOS Seatbelt path, the policy is passed directly as an argument and the
+workload receives ordinary stdin with only descriptors 0, 1, and 2. The supervisor itself supplies
+filtered HTTP and SOCKS egress, so compute does not create a host/Docker proxy or socket bridge for
+protections the supervisor already owns. Existing project policy files are denied directly.
+Missing protected paths are never materialized: macOS denies them natively, while the
+protected-create monitor is Linux-only, matching Codex's platform split.
 
 The four static supervisor artifacts are installed as optional dependencies so Docker can run a
 Linux supervisor even when the caller is on macOS. The package dependency is exactly

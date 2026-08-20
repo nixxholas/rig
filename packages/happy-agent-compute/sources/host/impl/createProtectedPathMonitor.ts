@@ -7,18 +7,21 @@ export interface ProtectedPathMonitor {
 }
 
 /**
- * Watches paths a sandboxed command must not create and removes any that appear.
+ * Watches paths a Linux-sandboxed command must not create and removes any that appear.
  *
  * The sandbox forbids writing agent metadata such as a project's protected config, but a command
  * may still try. Watching those exact paths and deleting whatever shows up, then reporting that a
  * violation occurred, is the fail-closed backstop: the file never survives the command, and the
- * caller can surface that the sandbox blocked the attempt.
+ * caller can surface that the sandbox blocked the attempt. macOS Seatbelt denies both the exact
+ * path and its descendants natively, as Codex does, so it needs no host filesystem watcher.
  */
 export async function createProtectedPathMonitor(
     paths: readonly string[],
 ): Promise<ProtectedPathMonitor> {
     const protectedPaths = [...new Set(paths)];
-    if (protectedPaths.length === 0) return { stop: async () => false };
+    if (process.platform !== "linux" || protectedPaths.length === 0) {
+        return { stop: async () => false };
+    }
     const watchers: FSWatcher[] = [];
     let scanning: Promise<void> | undefined;
     let stopped = false;

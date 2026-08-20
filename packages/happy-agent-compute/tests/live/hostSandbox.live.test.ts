@@ -125,6 +125,50 @@ describeLive("live host operating-system sandbox boundary", () => {
         expect(existsSync(deniedTarget)).toBe(false);
     });
 
+    it.runIf(process.platform === "darwin")(
+        "blocks first-time protected-path creation through Seatbelt alone",
+        async () => {
+            const cwd = await makeWorkspace();
+            const protectedPath = join(cwd, "agent-policy.toml");
+            const compute = track(
+                createHostCompute({
+                    ctx,
+                    cwd,
+                    hostPolicy: { protectedProjectFiles: ["agent-policy.toml"] },
+                }),
+            );
+
+            const result = await compute.shell.run({
+                command: "printf poisoned > agent-policy.toml",
+                permissions: workspaceWrite(),
+            });
+
+            expect(result.exitCode).not.toBe(0);
+            expect(existsSync(protectedPath)).toBe(false);
+        },
+    );
+
+    it.runIf(process.platform === "darwin")(
+        "runs consecutive restricted commands without a policy descriptor",
+        async () => {
+            const cwd = await makeWorkspace();
+            const compute = track(createHostCompute({ ctx, cwd }));
+
+            for (let index = 0; index < 50; index += 1) {
+                const result = await compute.shell.run({
+                    command: `printf ${String(index)}`,
+                    permissions: workspaceWrite(),
+                });
+                expect(result).toMatchObject({
+                    exitCode: 0,
+                    stdout: String(index),
+                    timedOut: false,
+                });
+            }
+        },
+        60_000,
+    );
+
     it("masks denied reads even when the same path is explicitly granted", async () => {
         const cwd = await makeWorkspace();
         const secretDirectory = join(cwd, "private");

@@ -1,7 +1,6 @@
 use serde_json::json;
 use std::fs;
 use std::io::Write;
-use std::os::fd::{AsRawFd, FromRawFd};
 use std::process::{Command, Output};
 use tempfile::TempDir;
 
@@ -74,35 +73,63 @@ fn command_output_and_exit_status_pass_through() {
 }
 
 #[test]
-fn policy_can_be_consumed_from_an_inherited_descriptor() {
+fn policy_can_be_consumed_from_an_argument() {
     let boundary = TestBoundary::new(false, false);
-    let mut descriptors = [-1, -1];
-    assert_eq!(unsafe { libc::pipe(descriptors.as_mut_ptr()) }, 0);
-    let policy_read = unsafe { fs::File::from_raw_fd(descriptors[0]) };
-    let mut policy_write = unsafe { fs::File::from_raw_fd(descriptors[1]) };
-    policy_write
-        .write_all(
-            &fs::read(&boundary.policy)
-                .unwrap_or_else(|error| panic!("read descriptor policy: {error}")),
-        )
-        .unwrap_or_else(|error| panic!("write descriptor policy: {error}"));
-    drop(policy_write);
+    let policy = fs::read_to_string(&boundary.policy)
+        .unwrap_or_else(|error| panic!("read argument policy: {error}"));
 
     let output = Command::new(SUPERVISOR)
         .current_dir(&boundary.workspace)
-        .arg("--policy-fd")
-        .arg(policy_read.as_raw_fd().to_string())
-        .args(["--", "/bin/sh", "-c", "printf fd-policy"])
+        .arg("--policy")
+        .arg(policy)
+        .args(["--", "/bin/sh", "-c", "printf argument-policy"])
         .output()
-        .unwrap_or_else(|error| panic!("run descriptor policy test: {error}"));
+        .unwrap_or_else(|error| panic!("run argument policy test: {error}"));
 
     assert!(
         output.status.success(),
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "fd-policy");
-    println!("policy-fd=consumed stdout=fd-policy");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "argument-policy");
+    println!("policy-argument=consumed stdout=argument-policy");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn seatbelt_blocks_first_time_creation_of_a_denied_path() {
+    let boundary = TestBoundary::new(false, false);
+    let canonical_workspace = boundary
+        .workspace
+        .canonicalize()
+        .unwrap_or_else(|error| panic!("canonical workspace: {error}"));
+    let protected = canonical_workspace.join("agent-policy.toml");
+    let policy = json!({
+        "mode": "workspace_write",
+        "deniedWritePaths": [protected.to_string_lossy()],
+        "network": {
+            "egress": false,
+            "localBinding": false
+        }
+    })
+    .to_string();
+
+    let output = Command::new(SUPERVISOR)
+        .current_dir(&boundary.workspace)
+        .args(["--policy", &policy, "--", "/bin/sh", "-c"])
+        .arg("printf poisoned > agent-policy.toml")
+        .output()
+        .unwrap_or_else(|error| panic!("run first-time denied-path test: {error}"));
+
+    assert!(
+        !output.status.success(),
+        "status={:?} protected-exists={} stderr={}",
+        output.status,
+        protected.exists(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!protected.exists());
+    println!("first-time-denied-path=blocked");
 }
 
 #[test]

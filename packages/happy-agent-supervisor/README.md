@@ -7,7 +7,7 @@ an argument vector; it applies the operating system's own isolation and then
 
 ```text
 caller
-  │ policy JSON on fd or file
+  │ policy JSON argument or trusted file
   │ argv after --
   ▼
 supervisor
@@ -104,13 +104,9 @@ const policy = parseSupervisorPolicy({
 
 const child = spawn(
     resolveSupervisorBinary(),
-    ["--policy-fd", "3", "--", "/usr/bin/env", "node", "build.mjs"],
-    {
-        cwd: "/work/project",
-        stdio: ["inherit", "inherit", "inherit", "pipe"],
-    },
+    ["--policy", JSON.stringify(policy), "--", "/usr/bin/env", "node", "build.mjs"],
+    { cwd: "/work/project", stdio: "inherit" },
 );
-child.stdio[3].end(JSON.stringify(policy));
 ```
 
 `parseSupervisorPolicy(value)` validates against the TypeBox schema and throws a
@@ -126,17 +122,17 @@ not installed. If neither is present they throw, naming the package to reinstall
 
 ## Command line
 
-Policy stays out of argv, and the command is always an argument vector:
+Policy and command are ordinary arguments, matching Codex's direct `sandbox-exec -p` invocation:
 
 ```sh
-happy-agent-supervisor --policy-fd 3 -- /bin/sh -c 'printf "%s\n" "$VALUE"'
+happy-agent-supervisor --policy '{"mode":"workspace_write","network":{"egress":false,"localBinding":false}}' -- /bin/sh -c 'printf "%s\n" "$VALUE"'
 happy-agent-supervisor --policy-file /trusted/policy.json -- /usr/bin/env
 ```
 
-Exactly one of `--policy-fd` and `--policy-file` is required, and everything
-after `--` is the target command. The supervisor consumes the policy descriptor;
-descriptors `0`, `1`, and `2` are rejected. Policy files are read and closed
-before sandbox setup. Policy JSON is limited to 1 MiB and rejects unknown fields.
+Exactly one of `--policy` and `--policy-file` is required, and everything after `--` is the target
+command. Policy files are read and closed before sandbox setup. Policy JSON is limited to 1 MiB and
+rejects unknown fields. The direct form creates no inherited descriptor beyond ordinary stdin,
+stdout, and stderr.
 A supervisor-level failure — a bad argument, an invalid policy, an enforcement
 step that would not apply — exits `125` with a message on stderr, which keeps it
 distinguishable from the workload's own status. Otherwise the workload's exit
