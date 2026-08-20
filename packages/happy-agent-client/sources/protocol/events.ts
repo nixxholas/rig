@@ -56,6 +56,13 @@ export interface GitUpdatedPayload {
     git: GitState;
 }
 
+/** File state is computed, so clients refetch the affected visible paths. */
+export interface FilesUpdatedPayload {
+    workspaceId: Cuid2;
+    /** Relative paths, or `null` when the safe scope is every visible path in the workspace. */
+    paths: string[] | null;
+}
+
 export type AgentCreatedPayload = MutationEcho & { agent: Agent };
 export type AgentUpdatedPayload = ResourceUpdate<Agent> & { agentId: Cuid2 };
 
@@ -169,6 +176,7 @@ export type HappyAgentEvent =
     | EventEnvelope<"terminal.created", TerminalCreatedPayload>
     | EventEnvelope<"terminal.updated", TerminalUpdatedPayload>
     | EventEnvelope<"git.updated", GitUpdatedPayload>
+    | EventEnvelope<"files.updated", FilesUpdatedPayload>
     | EventEnvelope<"agent.created", AgentCreatedPayload>
     | EventEnvelope<"agent.updated", AgentUpdatedPayload>
     | EventEnvelope<"agent.context.updated", AgentContextUpdatedPayload>

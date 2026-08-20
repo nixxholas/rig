@@ -1081,7 +1081,9 @@ Response — `200`: `{ "files": [ { "path": "sources/main.ts", "fileName": "main
 
 #### `GET /v0/workspaces/:workspaceId/file-tree`
 
-One directory level, sorted by name, paginated.
+One physical directory level, sorted by name, paginated. The listing is independent of fuzzy-file
+indexing and includes ignored folders such as `node_modules`; opening a large folder reads only
+that folder's immediate entries.
 
 Query parameters: `path` (optional, default the root), `cursor`, `limit`.
 
@@ -1111,6 +1113,10 @@ Reads one file. Query parameter: `path` (required).
 Response — `200`: `{ "content": "<base64>", "hash": "<sha256 hex>" }`. Content is base64
 because files are bytes, not necessarily text; the hash is the write guard below. Files over
 the daemon's size limit answer `413`.
+
+Reading a file or file-tree page also places its containing directory in the daemon's bounded set
+of recently viewed locations. Filesystem changes observed there emit `files.updated`, allowing a
+client to refresh an open file or expanded tree branch without polling the whole workspace.
 
 #### `PUT /v0/workspaces/:workspaceId/file`
 
@@ -2272,6 +2278,18 @@ how a bootstrap snapshot and an event stream reconcile.
   snapshot, and the client replaces what it had.
     - `workspaceId` (ID string) — the workspace whose repository changed.
     - `git` (full git state object, as returned by `GET /v0/workspaces/:workspaceId/git`).
+
+**Files**
+
+- `files.updated` — files or immediate tree entries changed in a recently viewed workspace
+  location, or a successful API file write changed the workspace. File state is computed, not a
+  versioned resource, so this is an invalidation nudge: the client re-reads any affected open file
+  or tree page.
+    - `workspaceId` (ID string) — the workspace whose files changed.
+    - `paths` (array of relative path strings, or `null`) — the paths the watcher identified,
+      coalesced into one bounded event. `null` means the operating system did not identify a path
+      or too many paths changed, so the client refreshes the visible file and tree state for that
+      workspace.
 
 **Agents**
 

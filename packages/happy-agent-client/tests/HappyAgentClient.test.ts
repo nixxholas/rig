@@ -205,6 +205,8 @@ describe("HappyAgentClient", () => {
             ": heartbeat\n\n",
             'id: c1\nevent: run.started\ndata: {"cursor":"c1","type":"run.started","occurredAt":2,',
             '"payload":{"agentId":"a1","runId":"r1"}}\n\n',
+            'id: c2\nevent: files.updated\ndata: {"cursor":"c2","type":"files.updated",',
+            '"occurredAt":3,"payload":{"workspaceId":"w1","paths":["src/main.ts"]}}\n\n',
         ].join("");
         const { fetch, requests } = stubFetch(
             () =>
@@ -232,6 +234,16 @@ describe("HappyAgentClient", () => {
                     type: "run.started",
                     occurredAt: 2,
                     payload: { agentId: "a1", runId: "r1" },
+                },
+            },
+            {
+                kind: "event",
+                cursor: "c2",
+                event: {
+                    cursor: "c2",
+                    type: "files.updated",
+                    occurredAt: 3,
+                    payload: { workspaceId: "w1", paths: ["src/main.ts"] },
                 },
             },
         ]);
