@@ -13,7 +13,7 @@
         "test": "vitest run --passWithNoTests"
     },
     "dependencies": {
-        "@lydell/node-pty": "1.2.0-beta.12",
+        "@lydell/node-pty": "1.2.0-beta.15",
         "@slopus/ghostty-wasm": "1.3.6"
     },
     "devDependencies": {

@@ -23,6 +23,7 @@ export function createHostTerminalProcessFactory(
             // A shell writes its prompt immediately, long before the emulator is wired up. Holding
             // those bytes until the first listener arrives is what keeps the first screen intact.
             const buffered: Uint8Array[] = [];
+            let exited = false;
             let listening: ((data: Uint8Array) => void) | undefined;
             const subscription = pty.onData((data) => {
                 const chunk = Buffer.from(data);
@@ -31,6 +32,7 @@ export function createHostTerminalProcessFactory(
             });
             const exit = new Promise<{ exitCode: number | null }>((resolve) => {
                 pty.onExit(({ exitCode }) => {
+                    exited = true;
                     subscription.dispose();
                     resolve({ exitCode });
                 });
@@ -50,6 +52,7 @@ export function createHostTerminalProcessFactory(
                     pty.pause();
                 },
                 resize(cols, rows) {
+                    if (exited) return;
                     pty.resize(cols, rows);
                 },
                 resume() {
@@ -57,6 +60,7 @@ export function createHostTerminalProcessFactory(
                 },
                 wait: () => exit,
                 write(data) {
+                    if (exited) return false;
                     pty.write(typeof data === "string" ? data : Buffer.from(data).toString("utf8"));
                     return true;
                 },

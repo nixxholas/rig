@@ -33,7 +33,7 @@
         "test:live:just-bash": "HAPPY_AGENT_COMPUTE_LIVE_TEST=1 vitest run tests/live/justBashPermissions.live.test.ts"
     },
     "dependencies": {
-        "@lydell/node-pty": "1.2.0-beta.12",
+        "@lydell/node-pty": "1.2.0-beta.15",
         "@sinclair/typebox": "^0.34.49",
         "@slopus/happy-agent-supervisor": "0.0.2",
         "@steve.kite/stdlib": "0.0.12",

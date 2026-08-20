@@ -1,4 +1,4 @@
-import { access, mkdtemp, readFile, rm } from "node:fs/promises";
+import { access, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -228,6 +228,29 @@ describe("NativeProcessManager", () => {
         expect(result.stdout).not.toContain(readyMarker);
         expect(result.stdout).not.toContain(completeMarker);
     });
+
+    it.runIf(process.platform === "darwin")(
+        "does not retain a descriptor for each completed PTY command",
+        async () => {
+            const cwd = await makeTemporaryDirectory();
+            const manager = new NativeProcessManager(ctx);
+            const before = (await readdir("/dev/fd")).length;
+
+            for (let index = 0; index < 20; index += 1) {
+                await manager.run(ctx, {
+                    command: "exit 0",
+                    cwd,
+                    timeoutMs: 2_000,
+                    tty: true,
+                });
+            }
+
+            const after = (await readdir("/dev/fd")).length;
+            // The test runner may lazily open a small amount of unrelated infrastructure. The
+            // broken node-pty release retained one kqueue descriptor for every command.
+            expect(after).toBeLessThanOrEqual(before + 2);
+        },
+    );
 
     it("retains the head and tail and reports omitted bytes when output exceeds its cap", async () => {
         const cwd = await makeTemporaryDirectory();
