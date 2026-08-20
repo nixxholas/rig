@@ -65,6 +65,7 @@ export interface MessageResourceOptions {
 }
 
 export interface ToolCallProjection {
+    readonly id: string;
     readonly name: string;
     readonly status: ToolCallStatus;
     readonly arguments?: unknown;
@@ -118,6 +119,7 @@ export function toolCallResource(
     const omitRaw = options.omitToolData === true && presentation !== undefined;
     return {
         type: "tool_call",
+        id: call.id,
         name: call.name,
         status: call.status,
         ...(omitRaw ? {} : { arguments: call.arguments ?? {} }),

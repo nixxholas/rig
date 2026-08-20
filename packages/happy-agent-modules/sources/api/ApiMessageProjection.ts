@@ -117,6 +117,7 @@ export function providerMessageContent(
         return [
             toolCallResource(
                 {
+                    id: callId,
                     name: call.name ?? "tool",
                     status:
                         result === undefined
@@ -174,6 +175,7 @@ function historyBlocks(
             const result = results.get(block.callId);
             return toolCallResource(
                 {
+                    id: block.callId,
                     name: block.name,
                     status:
                         result === undefined

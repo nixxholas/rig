@@ -833,6 +833,7 @@ describe("public transcript and run APIs", () => {
                           content: [
                               {
                                   arguments: { cmd: "printf presented" },
+                                  callId: "transcript-tool-presentation",
                                   name: "exec_command",
                                   type: "tool_call",
                               },
@@ -857,6 +858,7 @@ describe("public transcript and run APIs", () => {
 
         expect(fullTool).toMatchObject({
             type: "tool_call",
+            id: "transcript-tool-presentation",
             name: "exec_command",
             status: "completed",
             arguments: { cmd: "printf presented" },
@@ -870,6 +872,7 @@ describe("public transcript and run APIs", () => {
         expect(liveTool).toEqual(fullTool);
         expect(toolCallFrom(omitted)).toEqual({
             type: "tool_call",
+            id: "transcript-tool-presentation",
             name: "exec_command",
             status: "completed",
             presentation: fullTool.presentation,
@@ -914,6 +917,7 @@ describe("public transcript and run APIs", () => {
                     content: [
                         {
                             arguments: { cmd: "printf tool-result" },
+                            callId: "transcript-tool-result",
                             name: "exec_command",
                             type: "tool_call",
                         },
@@ -984,6 +988,7 @@ describe("public transcript and run APIs", () => {
         const omittedTool = toolCallFrom(omitted);
         const liveTool = completedToolCallFromEvents(await gym.events(), gym.defaultSessionId);
         expect(fullTool).toMatchObject({
+            id: "transcript-tool-result",
             arguments: { cmd: "printf tool-result" },
             result: { output: expect.stringContaining("tool-result") },
             presentation: {
@@ -995,6 +1000,7 @@ describe("public transcript and run APIs", () => {
         expect(liveTool).toEqual(fullTool);
         expect(omittedTool).toEqual({
             type: "tool_call",
+            id: "transcript-tool-result",
             name: "exec_command",
             status: "completed",
             presentation: fullTool.presentation,

@@ -427,6 +427,7 @@ describe("public message and history matrix", () => {
         const fullTool = firstTool(full);
         const omittedTool = firstTool(omitted);
         expect(fullTool).toMatchObject({
+            id: "mh-16-tool",
             arguments: { cmd: "printf matrix-tool" },
             result: { output: expect.stringContaining("matrix-tool") },
             presentation: {
@@ -437,6 +438,7 @@ describe("public message and history matrix", () => {
         });
         expect(omittedTool).toEqual({
             type: "tool_call",
+            id: "mh-16-tool",
             name: "exec_command",
             status: "completed",
             presentation: fullTool.presentation,

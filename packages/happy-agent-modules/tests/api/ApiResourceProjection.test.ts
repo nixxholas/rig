@@ -56,6 +56,7 @@ describe("messageResource", () => {
             content: [
                 {
                     type: "tool_call",
+                    id: "call-a",
                     name: "exec_command",
                     status: "completed",
                     arguments: { cmd: "pnpm test" },
@@ -210,6 +211,7 @@ describe("messageResource", () => {
         expect(message.content).toEqual([
             {
                 type: "tool_call",
+                id: "call-a",
                 name: "exec_command",
                 status: "completed",
                 presentation: {
@@ -220,6 +222,7 @@ describe("messageResource", () => {
             },
             {
                 type: "tool_call",
+                id: "call-b",
                 name: "custom_tool",
                 status: "completed",
                 arguments: { secret: "still needed to render" },
@@ -233,6 +236,7 @@ describe("toolCallResource", () => {
     it("projects fixed vendor exploration and search tools", () => {
         expect(
             toolCallResource({
+                id: "call-read",
                 name: "Read",
                 status: "running",
                 arguments: { file_path: "/workspace/auth.ts" },
@@ -245,6 +249,7 @@ describe("toolCallResource", () => {
         });
         expect(
             toolCallResource({
+                id: "call-search",
                 name: "grok_x_search",
                 status: "completed",
                 arguments: { query: "Rig launch" },
