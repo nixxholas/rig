@@ -93,6 +93,8 @@ export {
     type HappySpawnResult,
 } from "./handleHappySpawnSession.js";
 export { HappyMachineClient, type HappyMachineClientOptions } from "./HappyMachineClient.js";
+export { type HappyMachineRpcHandler } from "./HappyMachineClient.js";
+export { createHappyDutyMachineRpcHandlers } from "./createHappyDutyMachineRpcHandlers.js";
 export { HappyModule } from "./HappyModule.js";
 export { connectHappySocket } from "./connectHappySocket.js";
 export { decryptHappyBlob } from "./crypto/decryptHappyBlob.js";

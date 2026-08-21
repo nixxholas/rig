@@ -18,5 +18,8 @@ One module instance serves every agent. Bindings and run records live in module-
 tables and survive process restarts. Wake messages are agent-originated and carry no human
 authority. `get_duty` is the only Duty-owned model tool; lifecycle control remains with the issuer.
 
-The module intentionally adds no HTTP or Happy RPC route. Callers embedded in the Rig runtime use
-`runtime.modules.duty`; exposing these operations remotely is a separate API-contract change.
+When Rig is connected to Happy, it additionally registers `duty-issue`, `duty-activate`,
+`duty-status`, `duty-pause`, `duty-resume`, and `duty-stop` as machine-local RPC methods. They use
+Happy's existing encrypted namespaced machine relay, so an unchanged Happy server and existing
+Happy clients continue to use `spawn-happy-session` exactly as before. The methods are available
+only on a Rig machine; they do not add an HTTP route or change Happy's deployed app protocol.

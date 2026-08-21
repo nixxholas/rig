@@ -300,8 +300,10 @@ export async function startHappyAgentRuntime(
         });
 
         const installation = new InstallationModule();
+        const duty = new DutyModule();
         const happy = new HappyModule(
             config,
+            duty,
             events,
             history,
             projects,
@@ -310,7 +312,6 @@ export async function startHappyAgentRuntime(
             workspaces,
         );
         const goal = new GoalModule();
-        const duty = new DutyModule();
         const imageGeneration = new ImageGenerationModule(config);
         const modelSwitch = new ModelSwitchModule(history);
         const search = new SearchModule(config);
