@@ -24,6 +24,7 @@ import { SchedulingModule } from "../scheduling/index.js";
 import { UserInputModule, type UserInputRequest } from "../userInput/index.js";
 import { WorkspacesModule } from "../workspaces/index.js";
 import { ConfigModule } from "../config/index.js";
+import { DutyModule } from "../duty/index.js";
 import type { SessionInputBlock, SessionUserMessage } from "@slopus/happy-providers";
 import { afterCommit, detach, type Context } from "@steve.kite/stdlib";
 import type { LibSQLDatabase } from "drizzle-orm/libsql";
@@ -41,6 +42,7 @@ import type {
 import { HappySessionClient, type HappySessionOperations } from "./HappySessionClient.js";
 import { createHappySyncDatabase, happySyncMigrations } from "./HappySyncDatabase.js";
 import { HappyMessageMapper } from "./mapHappyMessages.js";
+import { createHappyDutyMachineRpcHandlers } from "./createHappyDutyMachineRpcHandlers.js";
 import { resolveHappyUserInputAnswers } from "./resolveHappyUserInputAnswers.js";
 
 /** How many agents one daemon keeps connected to Happy at once. */
@@ -97,6 +99,7 @@ export class HappyModule
     readonly migrations = happySyncMigrations;
     readonly #agents = new Map<string, ConnectedAgent>();
     readonly #config: ConfigModule;
+    readonly #duties: DutyModule;
     readonly #history: HistoryModule;
     readonly #scheduling: SchedulingModule;
     readonly #projects: ProjectsModule;
@@ -111,6 +114,7 @@ export class HappyModule
 
     constructor(
         config: ConfigModule,
+        duties: DutyModule,
         events: EventsModule,
         history: HistoryModule,
         projects: ProjectsModule,
@@ -119,6 +123,7 @@ export class HappyModule
         workspaces: WorkspacesModule,
     ) {
         this.#config = config;
+        this.#duties = duties;
         this.#history = history;
         this.#projects = projects;
         this.#scheduling = scheduling;
@@ -193,6 +198,7 @@ export class HappyModule
             context,
             models: () => this.models(),
             operations: this,
+            rpcHandlers: createHappyDutyMachineRpcHandlers(this.#duties),
             remoteSessionId: async (agentId) =>
                 (await this.#sync.readSession(context, agentId))?.remoteSessionId,
             version: this.#config.configuration.version,

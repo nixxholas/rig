@@ -26,6 +26,7 @@ import {
     type HappyAgentConfiguration,
 } from "../config/index.js";
 import { ContextWindowModule } from "../contextWindow/index.js";
+import { DutyModule } from "../duty/index.js";
 import { EventsModule } from "../events/index.js";
 import { ProjectFilesModule } from "../files/index.js";
 import { GitModule } from "../git/index.js";
@@ -99,6 +100,7 @@ export interface HappyAgentRuntimeModules {
     readonly compute: ComputeModule;
     readonly config: ConfigModule;
     readonly contextWindow: ContextWindowModule;
+    readonly duty: DutyModule;
     readonly events: EventsModule;
     readonly files: ProjectFilesModule;
     readonly goal: GoalModule;
@@ -298,8 +300,10 @@ export async function startHappyAgentRuntime(
         });
 
         const installation = new InstallationModule();
+        const duty = new DutyModule(config, projects);
         const happy = new HappyModule(
             config,
+            duty,
             events,
             history,
             projects,
@@ -345,6 +349,7 @@ export async function startHappyAgentRuntime(
             compute: compute.computeModule,
             config,
             contextWindow,
+            duty,
             events,
             files,
             goal,
@@ -386,6 +391,7 @@ export async function startHappyAgentRuntime(
             auto,
             presence,
             goal,
+            duty,
             tasks,
             usage,
             events,
@@ -459,6 +465,13 @@ export async function startHappyAgentRuntime(
         });
         await projects.open(withDatabase(ctx), installation.epoch);
         await workspaces.open(withDatabase(ctx));
+
+        // Project migrations and restoration are complete now; Duty owns the roster and asks the
+        // project catalog directly for each durable holder it needs.
+        unwind.unshift(() => duty.stop());
+        background("duty-roster", async (rosterCtx) => {
+            await duty.open(rosterCtx);
+        });
 
         profile.open(installation.epoch);
         unwind.unshift(async () => await murmur.close(withDatabase(ctx)));

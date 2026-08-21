@@ -32,11 +32,23 @@ export interface HappyMachineClientOptions {
     readonly fetch?: typeof fetch;
     readonly operations: HappySpawnOperations;
     readonly models: () => readonly HappyModel[];
+    /**
+     * Optional local extensions carried over Happy's existing namespaced machine RPC relay.
+     * The server only relays opaque encrypted payloads, so adding one never changes the remote
+     * Happy protocol for clients that do not call it.
+     */
+    readonly rpcHandlers?: readonly HappyMachineRpcHandler[];
     /** The session Happy should open, once Rig has published it. */
     readonly remoteSessionId: (agentId: string) => Promise<string | undefined>;
     /** Only a test supplies this; left out, the client opens its own connection to Happy. */
     readonly socketFactory?: (url: string, options: Record<string, unknown>) => HappySocket;
     readonly version: string;
+}
+
+/** One machine-local RPC extension exposed under `<machineId>:<method>`. */
+export interface HappyMachineRpcHandler {
+    readonly method: string;
+    handle(ctx: Context, params: unknown): Promise<unknown>;
 }
 
 const machineSchema = Type.Object(
@@ -80,6 +92,7 @@ export class HappyMachineClient {
     readonly #options: HappyMachineClientOptions;
     readonly #closeController = new AbortController();
     readonly #machineId: string;
+    readonly #rpcHandlers: ReadonlyMap<string, HappyMachineRpcHandler>;
     #closed = false;
     #keepAliveTimer: NodeJS.Timeout | undefined;
     #metadataBase: Record<string, unknown> = {};
@@ -93,6 +106,17 @@ export class HappyMachineClient {
         }
         this.#machineId = machineId;
         this.#options = options;
+        const handlers = new Map<string, HappyMachineRpcHandler>();
+        for (const handler of options.rpcHandlers ?? []) {
+            if (!/^[a-z][a-z0-9-]{0,63}$/u.test(handler.method)) {
+                throw new Error(`Happy machine RPC method "${handler.method}" is invalid.`);
+            }
+            if (handlers.has(handler.method)) {
+                throw new Error(`Happy machine RPC method "${handler.method}" is duplicated.`);
+            }
+            handlers.set(handler.method, handler);
+        }
+        this.#rpcHandlers = handlers;
     }
 
     /** Registers this computer with Happy and keeps it reachable. */
@@ -179,6 +203,9 @@ export class HappyMachineClient {
         );
         socket.on("connect", () => {
             socket.emit("rpc-register", { method: `${this.#machineId}:spawn-happy-session` });
+            for (const method of this.#rpcHandlers.keys()) {
+                socket.emit("rpc-register", { method: `${this.#machineId}:${method}` });
+            }
             this.#syncMetadata(metadataVersion, 0);
             this.#syncDaemonState(daemonStateVersion, 0);
             this.#sendAlive();
@@ -193,13 +220,13 @@ export class HappyMachineClient {
     }
 
     async #handleRpcRequest(request: unknown, callback: (response: string) => void): Promise<void> {
-        let answer: HappySpawnResult;
+        let answer: HappySpawnResult | unknown;
         if (
             !Value.Check(rpcRequestSchema, request) ||
-            request.method !== `${this.#machineId}:spawn-happy-session`
+            !request.method.startsWith(`${this.#machineId}:`)
         ) {
             answer = { errorMessage: "Happy sent a request Rig does not serve.", type: "error" };
-        } else {
+        } else if (request.method === `${this.#machineId}:spawn-happy-session`) {
             answer = await handleHappySpawnSession({
                 ctx: this.#options.context,
                 operations: this.#options.operations,
@@ -209,6 +236,30 @@ export class HappyMachineClient {
                 remoteSessionId: (agentId) => this.#awaitRemoteSession(agentId),
                 signal: this.#closeController.signal,
             });
+        } else {
+            const method = request.method.slice(this.#machineId.length + 1);
+            const handler = this.#rpcHandlers.get(method);
+            if (handler === undefined) {
+                answer = {
+                    errorMessage: "Happy sent a request Rig does not serve.",
+                    type: "error",
+                };
+            } else {
+                try {
+                    answer = await handler.handle(
+                        this.#options.context,
+                        this.#decode(request.params),
+                    );
+                } catch (error: unknown) {
+                    answer = {
+                        errorMessage:
+                            error instanceof Error
+                                ? error.message
+                                : "Rig could not complete the machine request.",
+                        type: "error",
+                    };
+                }
+            }
         }
         callback(this.#encode(answer));
     }
