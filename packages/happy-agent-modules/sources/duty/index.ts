@@ -9,4 +9,5 @@ export {
 } from "./DutyRoster.js";
 export { dutyAgentId } from "./impl/ensureDutyAgent.js";
 export { formatDutyForModel } from "./impl/formatDutyForModel.js";
+export { dutyControlTools } from "./tools/dutyControlTools.js";
 export { getDutyTool } from "./tools/get_duty.js";

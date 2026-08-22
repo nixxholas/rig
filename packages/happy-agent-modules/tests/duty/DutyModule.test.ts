@@ -12,6 +12,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { DutyModule } from "../../sources/duty/DutyModule.js";
 import type { DutyDeclaration, IssueDutyInput } from "../../sources/duty/Duty.js";
 import { dutyAgentId } from "../../sources/duty/index.js";
+import type { ConfigModule } from "../../sources/config/index.js";
 import type { ProjectsModule } from "../../sources/projects/index.js";
 import { moduleDatabase } from "../support/moduleDatabase.js";
 import { resolveModuleHooks } from "../support/moduleHooks.js";
@@ -28,9 +29,12 @@ const issued: IssueDutyInput = {
 
 interface Wake {
     readonly agentId: string;
+    readonly effort?: string;
     readonly id?: string;
     readonly metadata?: AgentMessageMetadata;
+    readonly model?: string;
     readonly permissionMode?: string;
+    readonly provider?: string;
     readonly text: string;
 }
 
@@ -60,18 +64,24 @@ function recordingAgents(failSend = false): {
             message: { readonly content: readonly { readonly text?: string }[] },
             options?: {
                 readonly id?: string;
+                readonly effort?: string;
                 readonly metadata?: AgentMessageMetadata;
+                readonly model?: string;
                 readonly permissionMode?: string;
+                readonly provider?: string;
             },
         ) => {
             if (failSend) throw new Error("send failed");
             wakes.push({
                 agentId,
                 ...(options?.id === undefined ? {} : { id: options.id }),
+                ...(options?.effort === undefined ? {} : { effort: options.effort }),
                 ...(options?.metadata === undefined ? {} : { metadata: options.metadata }),
+                ...(options?.model === undefined ? {} : { model: options.model }),
                 ...(options?.permissionMode === undefined
                     ? {}
                     : { permissionMode: options.permissionMode }),
+                ...(options?.provider === undefined ? {} : { provider: options.provider }),
                 text: message.content.map((block) => block.text ?? "").join(""),
             });
         },
@@ -738,6 +748,68 @@ allowed_tools = ["read_file"]
             await expect(module.runs(database.context, secondAgentId)).resolves.toEqual([
                 expect.objectContaining({ status: "queued", tenureId: "tenure-2" }),
             ]);
+        } finally {
+            module.stop();
+            database.close();
+        }
+    });
+
+    it("replaces an interactively managed Duty without making it roster-owned", async () => {
+        const module = new DutyModule(
+            {
+                models: [
+                    {
+                        defaultEffort: "medium",
+                        id: "openai/gpt-5.6-sol",
+                        providerId: "codex",
+                    },
+                ],
+            } as unknown as ConfigModule,
+            projectsFor(),
+        );
+        const database = moduleDatabase(module.migrations, "duty-managed-succession-test");
+        const agents = recordingAgents();
+        await database.ready;
+        module.beforeStart(database.context, agents.ref);
+        const firstAgentId = dutyAgentId(
+            declaration.dutyId,
+            declaration.tenureId,
+            declaration.project,
+        );
+        const secondAgentId = dutyAgentId(declaration.dutyId, "tenure-2", declaration.project);
+        try {
+            const first = await module.issueManagedDuty(database.context, declaration);
+            const repeated = await module.issueManagedDuty(database.context, declaration);
+            const replacement = await module.issueManagedDuty(database.context, {
+                ...declaration,
+                tenureId: "tenure-2",
+            });
+
+            expect(repeated.run.runId).toBe(first.run.runId);
+            expect(agents.wakes).toHaveLength(2);
+            expect(agents.wakes[1]).toMatchObject({
+                effort: "medium",
+                model: "openai/gpt-5.6-sol",
+                provider: "codex",
+            });
+            expect(replacement.duty).toMatchObject({
+                agentId: secondAgentId,
+                status: "active",
+                tenureId: "tenure-2",
+            });
+            expect(replacement.duty).not.toHaveProperty("roster");
+            await expect(module.duty(database.context, firstAgentId)).resolves.toMatchObject({
+                status: "stopped",
+            });
+            await expect(module.activeDuty(database.context, declaration.dutyId)).resolves.toEqual(
+                replacement.duty,
+            );
+
+            // An empty machine roster must not prune a Duty issued through ordinary Rig chat.
+            await module.reconcile(database.context, []);
+            await expect(module.duty(database.context, secondAgentId)).resolves.toMatchObject({
+                status: "active",
+            });
         } finally {
             module.stop();
             database.close();

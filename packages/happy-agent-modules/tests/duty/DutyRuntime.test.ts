@@ -15,7 +15,7 @@ import type { IssueDutyInput } from "../../sources/duty/Duty.js";
 import { dutyAgentId } from "../../sources/duty/index.js";
 import type { ProjectsModule } from "../../sources/projects/index.js";
 import { agentWorld } from "../support/agentWorld.js";
-import { providersOf, textTurn, toolCallTurn } from "../support/fixtures.js";
+import { providersOf, textTurn, toolCallTurn, user } from "../support/fixtures.js";
 import { ScriptedProvider } from "../support/ScriptedProvider.js";
 
 const root = createRootContext().named("happy-agent-modules-duty-runtime");
@@ -169,6 +169,58 @@ describe("Duty inside a live agent collection", () => {
             await expect(duty.runs(ctx, boundAgentId)).resolves.toEqual([
                 expect.objectContaining({ settledAt: expect.any(Number), status: "completed" }),
             ]);
+        } finally {
+            duty.stop();
+            await system.close(ctx);
+        }
+    });
+
+    it("issues a Duty through an ordinary root-session tool call", async () => {
+        const world = await agentWorld();
+        const ctx = withAgentDatabase(root, world.storage.database);
+        const declaration = {
+            allowedTools: ["get_duty"],
+            charter: "Watch the production release.",
+            dutyId: "production-watch",
+            permissionCeiling: "read_only" as const,
+            project: "/srv/repo",
+            tenureId: "tenure-1",
+            trigger: "Inspect production now.",
+        };
+        const provider = new ScriptedProvider([
+            toolCallTurn("issue-call", "issue_duty", JSON.stringify(declaration)),
+            textTurn("Duty issued."),
+            textTurn("Production inspected."),
+        ]);
+        const duty = new DutyModule(undefined, projects());
+        const system = await AgentSystemLocal.create(ctx, world.storage, {
+            models: [],
+            modules: [duty],
+            provider: "scripted",
+            providers: providersOf(provider),
+        });
+        try {
+            const issuer = await system.create(ctx, {});
+            await issuer.send(ctx, user("Issue the production watch Duty."));
+            await issuer.waitForIdle();
+
+            const holderId = dutyAgentId(
+                declaration.dutyId,
+                declaration.tenureId,
+                declaration.project,
+            );
+            await (await system.resolve(ctx, holderId)).waitForIdle();
+
+            const binding = await duty.duty(ctx, holderId);
+            expect(binding).toMatchObject({
+                dutyId: declaration.dutyId,
+                status: "active",
+            });
+            expect(binding).not.toHaveProperty("roster");
+            await expect(duty.runs(ctx, holderId)).resolves.toEqual([
+                expect.objectContaining({ status: "completed" }),
+            ]);
+            expect(JSON.stringify(provider.sessions[0]?.options)).toContain("issue_duty");
         } finally {
             duty.stop();
             await system.close(ctx);

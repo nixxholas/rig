@@ -1,7 +1,8 @@
 # Duty module
 
-`DutyModule` binds a durable Rig agent to one machine-issued charter. Issuance is a public module
-operation, not a model tool, so an agent cannot promote itself or broaden its own authority.
+`DutyModule` binds a durable Rig agent to one machine-issued charter. Bindings, runs, alarms, and
+replacement are local Rig state. An unbound root session may control that state through ordinary
+agent tools, so any existing chat transport can act as the console without knowing what a Duty is.
 
 ```text
 Happy/Config/duties.toml   <- the machine's roster, read on every start
@@ -19,9 +20,17 @@ durable binding + run -- AgentSystemRef.send --> bound Rig agent
 
 One module instance serves every agent. Bindings and run records live in module-owned database
 tables and survive process restarts. Wake messages are agent-originated and carry no human
-authority. `get_duty` is the only Duty-owned model tool; lifecycle control remains with the issuer.
+authority. Duty holders receive only `get_duty` from this module. Unbound root sessions additionally
+receive `issue_duty`, `list_duties`, `activate_duty`, and `set_duty_status`, so a holder cannot
+promote or replace itself. Issuance and permanent stop use the normal permission-review path in
+auto mode.
 
-When Rig is connected to Happy, it additionally registers `duty-issue`, `duty-activate`,
+`issue_duty` creates a dedicated durable holder instead of binding the control session. Repeating
+the same declaration is idempotent. A new tenure stops the current holder and creates a fresh one
+without inherited conversation history; this is the replacement path when a holder is no longer
+performing. Interactively issued bindings survive restart and are not pruned by an empty roster.
+
+When Rig is connected to Happy, it may additionally register `duty-issue`, `duty-activate`,
 `duty-status`, `duty-pause`, `duty-resume`, and `duty-stop` as machine-local RPC methods. They use
 Happy's existing encrypted namespaced machine relay, so an unchanged Happy server and existing
 Happy clients continue to use `spawn-happy-session` exactly as before. The methods are available
@@ -90,4 +99,6 @@ message of the same shape scheduling and collaboration already send.
 
 That is deliberate: it lets Duties run against an **unmodified** happy.engineering deployment.
 Happy machine RPC is an optional control path over the existing encrypted relay, not a prerequisite
-for roster issuance, recovery, or periodic wakes.
+for issuance, inspection, replacement, recovery, or periodic wakes. An existing Happy client can
+send a normal message to an ordinary Rig session, approve the standard tool call, and then see and
+message the dedicated holder as another ordinary session.

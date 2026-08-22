@@ -44,6 +44,7 @@ import { dutyDeclarationHash, readDutyRoster } from "./DutyRoster.js";
 import { DutyDatabase } from "./impl/DutyDatabase.js";
 import { ensureDutyAgent } from "./impl/ensureDutyAgent.js";
 import { formatDutyForModel } from "./impl/formatDutyForModel.js";
+import { dutyControlTools } from "./tools/dutyControlTools.js";
 import { getDutyTool } from "./tools/get_duty.js";
 
 const DUTY_RUN_METADATA_KEY = "dutyRunId";
@@ -110,7 +111,17 @@ export class DutyModule implements AgentModule {
                 const binding = await this.duty(ctx, agent.id);
                 if (binding?.status === "active") await this.#changeStatus(ctx, agent.id, "paused");
             },
-            tools: (_ctx, scope) => [getDutyTool(this, scope.agent.id)],
+            tools: async (ctx, scope) => {
+                const inspection = getDutyTool(this, scope.agent.id);
+                const binding = await this.duty(ctx, scope.agent.id);
+                if (
+                    binding !== undefined ||
+                    (await agents.parentOf(ctx, scope.agent.id)) !== null
+                ) {
+                    return [inspection];
+                }
+                return [inspection, ...dutyControlTools(this)];
+            },
             instructions: async (ctx, scope) => {
                 const binding = await this.duty(ctx, scope.agent.id);
                 if (binding === undefined || binding.status === "stopped") return "";
@@ -326,6 +337,71 @@ export class DutyModule implements AgentModule {
         return await this.#issueDuty(ctx, agentId, input);
     }
 
+    /**
+     * Issue a machine-owned Duty to a dedicated durable holder.
+     *
+     * This is the local control path used by an ordinary Rig session. A changed tenure creates a
+     * fresh holder and stops the previous one before the replacement is woken. Unlike roster-owned
+     * bindings, an interactively issued Duty is not pruned by a missing roster entry on restart.
+     */
+    async issueManagedDuty(
+        ctx: Context,
+        declaration: DutyDeclaration,
+    ): Promise<{ duty: DutyBinding; run: DutyRun }> {
+        if (!Value.Check(dutyDeclarationSchema, declaration)) {
+            throw new Error("Duty declaration is invalid.");
+        }
+        return await this.#reconciliation.runInLock(ctx, async (lockCtx) => {
+            const agents = this.#agents;
+            const projects = this.#projects;
+            if (agents === undefined || projects === undefined) {
+                throw new Error("Issuing a managed Duty requires the agent system and projects.");
+            }
+            const agentId = await ensureDutyAgent(lockCtx, projects, agents, declaration);
+            const existing = (await this.#bindings(lockCtx)).filter(
+                (binding) => binding.dutyId === declaration.dutyId && binding.status !== "stopped",
+            );
+            const current = existing.find((binding) => binding.agentId === agentId);
+            if (current !== undefined && matchesDeclaration(current, declaration)) {
+                const run = [...(await this.runs(lockCtx, agentId))]
+                    .reverse()
+                    .find(
+                        (candidate) =>
+                            candidate.dutyId === declaration.dutyId &&
+                            candidate.tenureId === declaration.tenureId,
+                    );
+                if (run !== undefined) return { duty: current, run };
+            }
+            for (const binding of existing) {
+                await this.changeDutyStatus(lockCtx, binding.agentId, "stopped");
+            }
+            return await this.#issueDuty(lockCtx, agentId, {
+                allowedTools: declaration.allowedTools,
+                charter: declaration.charter,
+                dutyId: declaration.dutyId,
+                ...(declaration.every === undefined ? {} : { every: declaration.every }),
+                permissionCeiling: declaration.permissionCeiling,
+                tenureId: declaration.tenureId,
+                trigger: declaration.trigger,
+            });
+        });
+    }
+
+    /** Every valid local binding, including stopped holders retained for audit history. */
+    async duties(ctx: Context): Promise<readonly DutyBinding[]> {
+        return await this.#bindings(ctx);
+    }
+
+    /** Resolve the one live holder for a machine Duty ID. */
+    async activeDuty(ctx: Context, dutyId: string): Promise<DutyBinding | undefined> {
+        if (!Value.Check(dutyIdSchema, dutyId)) throw new Error("Duty ID is invalid.");
+        const active = (await this.#bindings(ctx)).filter(
+            (binding) => binding.dutyId === dutyId && binding.status !== "stopped",
+        );
+        if (active.length > 1) throw new Error(`Duty "${dutyId}" has multiple live holders.`);
+        return active[0];
+    }
+
     async #issueDuty(
         ctx: Context,
         agentId: string,
@@ -464,6 +540,7 @@ export class DutyModule implements AgentModule {
     async #wake(ctx: Context, duty: DutyBinding, run: DutyRun): Promise<void> {
         const agents = this.#agents;
         if (agents === undefined) throw new Error("Issuing a Duty requires the agent system.");
+        const model = this.#config?.models[0];
         await agents.send(
             ctx,
             duty.agentId,
@@ -483,6 +560,13 @@ export class DutyModule implements AgentModule {
                     ...senderAgentIdMetadata(duty.agentId),
                     [DUTY_RUN_METADATA_KEY]: run.runId,
                 },
+                ...(model === undefined
+                    ? {}
+                    : {
+                          effort: model.defaultEffort,
+                          model: model.id,
+                          provider: model.providerId,
+                      }),
                 permissionMode: duty.permissionCeiling,
             },
         );
@@ -702,6 +786,17 @@ function permissionRank(mode: AgentPermissionMode): number {
 
 function narrowerMode(left: AgentPermissionMode, right: AgentPermissionMode): AgentPermissionMode {
     return permissionRank(left) <= permissionRank(right) ? left : right;
+}
+
+function matchesDeclaration(binding: DutyBinding, declaration: DutyDeclaration): boolean {
+    return (
+        binding.charter === declaration.charter.trim() &&
+        binding.tenureId === declaration.tenureId &&
+        binding.permissionCeiling === declaration.permissionCeiling &&
+        binding.every === declaration.every &&
+        JSON.stringify([...binding.allowedTools].sort()) ===
+            JSON.stringify([...declaration.allowedTools].sort())
+    );
 }
 
 function dutyMessageId(agentId: string, runId: string): string {
