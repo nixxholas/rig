@@ -62,6 +62,26 @@ describe("Happy sync storage", () => {
         });
     });
 
+    it("retains a published session identity when the same account reconnects after restart", async () => {
+        await withDatabase("happy-restart-attach", async (sync, database) => {
+            await sync.ensureSession(database.context, ATTACH, NOW);
+            await sync.setRemoteSession(database.context, ATTACH.agentId, "remote-1", NOW + 1);
+            await sync.advanceRemoteSequence(database.context, ATTACH.agentId, 7, NOW + 2);
+
+            const restored = await sync.ensureSession(
+                database.context,
+                { ...ATTACH, encryptionKeyBase64: "bmV3LWtleQ==" },
+                NOW + 3,
+            );
+
+            expect(restored).toMatchObject({
+                encryptionKeyBase64: ATTACH.encryptionKeyBase64,
+                lastRemoteSeq: 7,
+                remoteSessionId: "remote-1",
+            });
+        });
+    });
+
     it("discards the remote identity and the queue when the account changes", async () => {
         await withDatabase("happy-rotate", async (sync, database) => {
             await sync.ensureSession(database.context, ATTACH, NOW);

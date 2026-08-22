@@ -204,6 +204,31 @@ export class HappyModule
             version: this.#config.configuration.version,
         });
         this.#machine.start();
+        await this.#restoreSessions(context);
+    }
+
+    /** Reconnect every durable Happy projection that belonged to this account before restart. */
+    async #restoreSessions(ctx: Context): Promise<void> {
+        const system = this.#system();
+        const agentIds = await this.#sync.listAgentIds(
+            ctx,
+            this.#fingerprint,
+            MAX_CONNECTED_AGENTS,
+        );
+        for (const agentId of agentIds) {
+            try {
+                if ((await system.config(ctx, agentId)) === undefined) {
+                    await this.#sync.removeSession(ctx, agentId);
+                    continue;
+                }
+                await this.#attach(ctx, agentId);
+            } catch (error: unknown) {
+                ctx.log.error(
+                    { agentId, error },
+                    "A persisted Happy session could not reconnect after restart.",
+                );
+            }
+        }
     }
 
     /** Stops talking to Happy, which the daemon does as it shuts down. */
