@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { mkdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
@@ -36,7 +37,7 @@ export type HappySpawnResult =
     | { readonly type: "requestToApproveDirectoryCreation"; readonly directory: string }
     | { readonly type: "error"; readonly errorMessage: string };
 
-const spawnRequestSchema = Type.Object(
+const rigSpawnRequestSchema = Type.Object(
     {
         agent: Type.Literal("rig"),
         approvedNewDirectoryCreation: Type.Optional(Type.Boolean()),
@@ -46,6 +47,28 @@ const spawnRequestSchema = Type.Object(
         modelId: Type.Optional(Type.String({ maxLength: 256 })),
         permissionMode: Type.Optional(Type.String({ maxLength: 256 })),
         providerId: Type.Optional(Type.String({ maxLength: 256 })),
+        type: Type.Literal("spawn-in-directory"),
+    },
+    { additionalProperties: true },
+);
+
+const deployedHappySpawnRequestSchema = Type.Object(
+    {
+        agent: Type.Optional(
+            Type.Union([
+                Type.Literal("agy"),
+                Type.Literal("claude"),
+                Type.Literal("codex"),
+                Type.Literal("gemini"),
+                Type.Literal("openclaw"),
+            ]),
+        ),
+        approvedNewDirectoryCreation: Type.Optional(Type.Boolean()),
+        directory: Type.String({ maxLength: 32_768, minLength: 1 }),
+        effortLevel: Type.Optional(Type.String({ maxLength: 256 })),
+        modelMode: Type.Optional(Type.String({ maxLength: 256 })),
+        permissionMode: Type.Optional(Type.String({ maxLength: 256 })),
+        token: Type.Optional(Type.String({ maxLength: 256, minLength: 1 })),
         type: Type.Literal("spawn-in-directory"),
     },
     { additionalProperties: true },
@@ -71,10 +94,10 @@ export async function handleHappySpawnSession(options: {
     signal?: AbortSignal;
 }): Promise<HappySpawnResult> {
     try {
-        if (!Value.Check(spawnRequestSchema, options.params)) {
+        const request = normalizeSpawnRequest(options.params, options.models);
+        if (request === undefined) {
             throw new Error("Happy asked for a session Rig does not know how to start.");
         }
-        const request = options.params;
         options.signal?.throwIfAborted();
         const directory = resolveDirectory(request.directory);
         const found = await inspectDirectory(directory);
@@ -123,6 +146,52 @@ export async function handleHappySpawnSession(options: {
             type: "error",
         };
     }
+}
+
+function normalizeSpawnRequest(value: unknown, models: readonly HappyModel[]) {
+    if (Value.Check(rigSpawnRequestSchema, value)) return value;
+    if (!Value.Check(deployedHappySpawnRequestSchema, value)) return undefined;
+
+    const providerId = legacyProviderId(value.agent);
+    const candidates =
+        providerId === undefined
+            ? models
+            : models.filter((model) => model.providerId === providerId);
+    const model =
+        candidates.find(
+            (candidate) => candidate.id === value.modelMode || candidate.name === value.modelMode,
+        ) ??
+        candidates[0] ??
+        models[0];
+    const effort =
+        model?.effortLevels.includes(value.effortLevel ?? "") === true
+            ? value.effortLevel
+            : model?.defaultEffort;
+
+    return {
+        agent: "rig" as const,
+        approvedNewDirectoryCreation: value.approvedNewDirectoryCreation,
+        clientRequestId: value.token ?? randomUUID(),
+        directory: value.directory,
+        effort,
+        modelId: model?.id,
+        permissionMode: legacyPermissionMode(value.permissionMode),
+        providerId: model?.providerId,
+        type: "spawn-in-directory" as const,
+    };
+}
+
+function legacyProviderId(agent: string | undefined): string | undefined {
+    if (agent === "claude" || agent === "codex") return agent;
+    return undefined;
+}
+
+function legacyPermissionMode(value: string | undefined): AgentPermissionMode {
+    if (isAgentPermissionMode(value)) return value;
+    if (value === "bypassPermissions" || value === "yolo") return "full_access";
+    if (value === "acceptEdits" || value === "safe-yolo") return "workspace_write";
+    if (value === "plan" || value === "read-only") return "read_only";
+    return "auto";
 }
 
 function chooseModel(

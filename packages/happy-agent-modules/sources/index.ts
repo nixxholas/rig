@@ -23,6 +23,7 @@ export * from "./files/index.js";
 export * from "./happy/index.js";
 export * from "./api/index.js";
 export * from "./runtime/index.js";
+export * from "./duty/index.js";
 
 // Config: the resolved filesystem layout and layered Happy Agent settings.
 export {

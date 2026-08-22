@@ -14,6 +14,8 @@ export interface HappyMachineMetadata {
     defaults: { effort: string; modelId: string; permissionMode: "auto"; providerId: string };
     displayName: string;
     happyHomeDir: string;
+    happiestCliVersion: string;
+    happiestHomeDir: string;
     homeDir: string;
     host: string;
     machineKind: "rig";
@@ -61,6 +63,8 @@ export function createHappyMachineMetadata(options: {
         },
         displayName: `${host} — Rig`,
         happyHomeDir: options.configuration.happyHome,
+        happiestCliVersion: options.version,
+        happiestHomeDir: options.configuration.happyHome,
         homeDir: homedir(),
         host,
         machineKind: "rig",
