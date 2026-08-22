@@ -21,6 +21,7 @@ import type { HappySocket } from "./HappySessionClient.js";
 const HTTP_TIMEOUT_MS = 15_000;
 const RETRY_INTERVAL_MS = 5_000;
 const KEEP_ALIVE_INTERVAL_MS = 20_000;
+const SPAWN_SESSION_RPC_METHODS = ["spawn-happiest-session", "spawn-happy-session"] as const;
 
 /** How long a spawned session is given to be published before the phone is told to wait. */
 const SPAWN_PUBLISH_TIMEOUT_MS = 10_000;
@@ -202,7 +203,9 @@ export class HappyMachineClient {
             },
         );
         socket.on("connect", () => {
-            socket.emit("rpc-register", { method: `${this.#machineId}:spawn-happy-session` });
+            for (const method of SPAWN_SESSION_RPC_METHODS) {
+                socket.emit("rpc-register", { method: `${this.#machineId}:${method}` });
+            }
             for (const method of this.#rpcHandlers.keys()) {
                 socket.emit("rpc-register", { method: `${this.#machineId}:${method}` });
             }
@@ -226,7 +229,11 @@ export class HappyMachineClient {
             !request.method.startsWith(`${this.#machineId}:`)
         ) {
             answer = { errorMessage: "Happy sent a request Rig does not serve.", type: "error" };
-        } else if (request.method === `${this.#machineId}:spawn-happy-session`) {
+        } else if (
+            SPAWN_SESSION_RPC_METHODS.some(
+                (method) => request.method === `${this.#machineId}:${method}`,
+            )
+        ) {
             answer = await handleHappySpawnSession({
                 ctx: this.#options.context,
                 operations: this.#options.operations,

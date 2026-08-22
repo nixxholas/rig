@@ -119,14 +119,25 @@ afterEach(() => {
 });
 
 describe("HappyMachineClient", () => {
-    it("keeps the legacy session RPC as the only registration without extensions", async () => {
+    it("registers and serves current and legacy session RPC names", async () => {
         store = moduleDatabase([], "happy-machine-client-legacy");
         const socket = new FakeSocket();
         const machine = client(socket);
         machine.start();
 
         await vi.waitFor(() => {
-            expect(socket.registrations()).toEqual([{ method: "machine-1:spawn-happy-session" }]);
+            expect(socket.registrations()).toEqual([
+                { method: "machine-1:spawn-happiest-session" },
+                { method: "machine-1:spawn-happy-session" },
+            ]);
+        });
+        await expect(socket.rpc("machine-1:spawn-happiest-session", {})).resolves.toEqual({
+            errorMessage: "Happy asked for a session Rig does not know how to start.",
+            type: "error",
+        });
+        await expect(socket.rpc("machine-1:spawn-happy-session", {})).resolves.toEqual({
+            errorMessage: "Happy asked for a session Rig does not know how to start.",
+            type: "error",
         });
 
         machine.close();
@@ -149,6 +160,7 @@ describe("HappyMachineClient", () => {
 
         await vi.waitFor(() => {
             expect(socket.registrations()).toEqual([
+                { method: "machine-1:spawn-happiest-session" },
                 { method: "machine-1:spawn-happy-session" },
                 { method: "machine-1:duty-status" },
             ]);
