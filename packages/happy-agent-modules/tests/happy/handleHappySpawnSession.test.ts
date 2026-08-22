@@ -83,6 +83,34 @@ describe("starting a session from somebody's phone", () => {
         ]);
     });
 
+    it("starts a Rig session from the deployed Happy machine payload", async () => {
+        const spawn = spawner("remote-1");
+        const result = await handleHappySpawnSession({
+            ctx,
+            operations: spawn.operations,
+            machineId: "machine-1",
+            models: MODELS,
+            params: {
+                approvedNewDirectoryCreation: false,
+                directory,
+                type: "spawn-in-directory",
+            },
+            remoteSessionId: spawn.remoteSessionId,
+        });
+
+        expect(result).toEqual({ sessionId: "remote-1", type: "success" });
+        expect(spawn.started).toEqual([
+            {
+                cwd: directory,
+                effort: "medium",
+                modelId: "gpt-5.6-sol",
+                permissionMode: "auto",
+                providerId: "codex",
+                sessionId: expect.stringMatching(/^[a-z][a-z0-9]{1,31}$/),
+            },
+        ]);
+    });
+
     it("reports a session Happy has not been told about yet as still owed", async () => {
         const spawn = spawner(undefined);
         expect(
